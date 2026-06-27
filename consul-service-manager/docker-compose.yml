@@ -1,0 +1,47 @@
+# Запуск командой `export HOSTNAME=$HOSTNAME && docker compose up -d --pull always`
+
+name: consul-service-manager
+services:
+  consul-agent:
+    image: hashicorp/consul:1.22
+    container_name: consul-agent
+    hostname: consul-agent-zub
+    ports:  # Alt: `network_mode: host`
+      - "<FILL_IT>:<FILL_IT>/tcp"  # TCP
+      - "<FILL_IT>:<FILL_IT>/udp"  # UDP for gossip
+    volumes:
+    - ./agents-configs/${HOSTNAME}-agent.json:/consul/config/agent.json:ro
+    - consul_data:/consul/data
+    command:
+    - "agent"
+    - "-data-dir=/consul/data"
+    - "-config-dir=/consul/config"
+    - "-serf-lan-port=<FILL_IT>"
+    healthcheck:
+      test: ["CMD-SHELL", "consul members | grep -q 'alive'"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 100M
+
+  consul-service-manager:
+    image: repo.rezonit.ru/sites/consul/consul-service-manager:latest
+    container_name: consul-service-manager
+    network_mode: "service:consul-agent"
+    depends_on:
+      consul-agent:
+        condition: service_healthy
+    env_file:
+    - ./service-manager-configs/${HOSTNAME}.env
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 100M
+
+volumes:
+  consul_data:

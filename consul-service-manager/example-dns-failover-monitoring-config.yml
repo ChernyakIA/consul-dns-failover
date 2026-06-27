@@ -1,0 +1,79 @@
+## ======== EXPLAINED CONFIGURATION EXAMPLE ======== ##
+
+# Example of a declarative environment schema.
+# Outlines the parameters utilized to provision the monitoring engines inside the DNS-Failover ecosystem.
+
+defaults:
+  check:
+    interval: "15s"                   # Overridden at endpoints.[].check levels
+    timeout: "5s"                     # Overridden at endpoints.[].check levels
+    deregister_critical_after: "10m"  # Time elapsed before a failing ("critical") service is deregistered. Set to "0s" or "" to keep registered. Highly recommended to set this to at least 5x the threshold execution interval.
+    success_before_passing: 2         # Consecutive passes required to transition a service health status from 'critical' to 'passing'
+    failures_before_warning: 2        # Consecutive check timeouts/failures required to transition status from 'passing' to 'warning'
+    failures_before_critical: 3       # Consecutive check timeouts/failures required to transition status from 'warning' to 'critical'
+  quorum: 1                           # Binds DNS target if at least N tracking sites report the service status as 'passing'
+  ttl: 60
+
+zones:
+## PROVIDER: EXTERNAL CLOUD DNS (e.g., SELECTEL)
+- zone_name: "example.com"
+  dns_provider: "selecteldns"         # Pick backend driver: selecteldns | windns
+  sel_zone_id: "00000000-0000-0000-0000-000000000000"
+  records:
+
+  - name: "dev-test-1"
+    ttl: 60
+    on_all_fail: "fallback"           # Action code: keep | remove | fallback. Determines target status if all checks fail. If omitted or removed from this config, dns-manager enforces "remove".
+    fallback_ip: "192.0.2.10"         # Mandatory destination address if on_all_fail is set to fallback
+    endpoints:
+    - ip: "198.51.100.50"
+      uplink_provider: "isp-primary"  # Upstream ISP identifier. Compiled directly into consul service_id fields
+      sites: ["host-a", "host-b"]     # Tracking endpoints/daemons which monitor health on targeted routes
+      quorum: 2                       # (Optional) Overrides default quorum configuration for this endpoint context. Enforces confirmation constraints <= len(sites)
+      check:                          # kinds: icmp -> ping execution; tcp -> {"TCP": "target:port"}; http -> {"HTTP": "uri"}. Optional: tls_skip_verify: bool, custom headers
+        kind: "icmp"                  # Options: icmp (set target) / tcp (set target and port, e.g. 25 for SMTP) / http (set port, path, and method) / smtp (set target, port [defaults to 25])
+        target: "203.0.113.179"       # Physical check destination (if null, defaults to resolving against the primary endpoint IP)
+    
+    - ip: "192.0.2.123"
+      uplink_provider: "isp-primary"
+      sites: ["host-a"]
+      check:
+        kind: "http"
+        target: "198.51.100.130"
+        port: 8080
+        path: "/healthz"
+        method: "GET"
+
+
+  - name: "mta-gateway-01"
+    ttl: 60
+    on_all_fail: "remove"
+    fallback_ip: ""
+    endpoints:
+    - ip: "203.0.113.36"
+      uplink_provider: "isp-secondary"
+      sites: ["host-a", "host-b"]
+      check:
+        kind: "smtp"
+        target: "203.0.113.36"
+
+
+## PROVIDER: ACTIVE DIRECTORY / WINDOWS DNS
+- zone_name: "corp.example.com"
+  dns_provider: "windns"
+  win_dns_server: "corp-dc-01"
+  records:
+
+  - name: "vpn"
+    ttl: 60
+    on_all_fail: "remove"
+    endpoints:
+    - ip: "192.0.2.123"
+      uplink_provider: "isp-primary"
+      sites: ["host-a"]
+      check:
+        kind: "http"
+        target: "198.51.100.130"
+        port: 8080
+        path: "/healthz"
+        method: "GET"

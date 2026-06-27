@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dns-manager-windns
+  namespace: <FILL_IT>
+  labels:
+    app: dns-manager-windns
+    app.kubernetes.io/name: dns-manager-windns
+spec:
+  selector:
+    matchLabels:
+      app: dns-manager-windns
+  replicas: 1
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: dns-manager-windns
+        app.kubernetes.io/name: dns-manager-windns
+        app.kubernetes.io/part-of: dns-failover
+        app.kubernetes.io/component: dns-manager
+    spec:
+      securityContext:
+        runAsUser: 100
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: consul-template
+        image: <FILL_IT>
+        args: ["-config=/etc/consul-template/config.hcl"]
+        env:
+        - name: DNS_PROVIDER_NAME
+          value: "windns"
+          
+        - name: CONSUL_GC_PATH
+          valueFrom:
+            configMapKeyRef:
+              name: consul-template-config
+              key: CONSUL_GC_PATH
+        - name: CONSUL_HTTP_ADDR
+          valueFrom:
+            configMapKeyRef:
+              name: consul-template-config
+              key: CONSUL_HTTP_ADDR
+        - name: SERVICE_NAME_REGEX
+          valueFrom:
+            configMapKeyRef:
+              name: consul-template-config
+              key: SERVICE_NAME_REGEX
+        - name: WIN_SSH_HOST
+          valueFrom:
+            secretKeyRef:
+              name: dns-manager-windns-secrets
+              key: WIN_SSH_HOST
+        - name: WIN_SSH_USER
+          valueFrom:
+            secretKeyRef:
+              name: dns-manager-windns-secrets
+              key: WIN_SSH_USER
+        - name: WIN_SSH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: dns-manager-windns-secrets
+              key: WIN_SSH_PASSWORD
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+          limits:
+            cpu: 200m
+            memory: 500M
+        volumeMounts:
+        - name: consul-template-config
+          mountPath: /etc/consul-template/config.hcl
+          subPath: config.hcl
+        - name: consul-template-config
+          mountPath: /home/consul-template/template-service.tpl
+          subPath: template-service.tpl
+        - name: consul-template-config
+          mountPath: /home/consul-template/main.py
+          subPath: dns-failover-manager-windns.py
+      restartPolicy: Always
+      volumes:
+      - name: consul-template-config
+        configMap:
+          name: consul-template-config
+          

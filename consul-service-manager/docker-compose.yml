@@ -7,8 +7,8 @@ services:
     container_name: consul-agent
     hostname: consul-agent-zub
     ports:  # Alt: `network_mode: host`
-      - "<FILL_IT>:<FILL_IT>/tcp"  # TCP
-      - "<FILL_IT>:<FILL_IT>/udp"  # UDP for gossip
+      - "<FILL_THIS_FIELD>:<FILL_THIS_FIELD>/tcp"  # TCP
+      - "<FILL_THIS_FIELD>:<FILL_THIS_FIELD>/udp"  # UDP for gossip
     volumes:
     - ./agents-configs/${HOSTNAME}-agent.json:/consul/config/agent.json:ro
     - consul_data:/consul/data
@@ -16,7 +16,7 @@ services:
     - "agent"
     - "-data-dir=/consul/data"
     - "-config-dir=/consul/config"
-    - "-serf-lan-port=<FILL_IT>"
+    - "-serf-lan-port=<FILL_THIS_FIELD>"
     healthcheck:
       test: ["CMD-SHELL", "consul members | grep -q 'alive'"]
       interval: 5s

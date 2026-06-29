@@ -1,13 +1,13 @@
 {
-  "datacenter": "<FILL_IT>",
-  "encrypt": "<FILL_IT>",
-  "retry_join": ["<FILL_IT>", "<FILL_IT>", "<FILL_IT>"],
+  "datacenter": "<FILL_THIS_FIELD>",
+  "encrypt": "<FILL_THIS_FIELD>",
+  "retry_join": ["<FILL_THIS_FIELD>", "<FILL_THIS_FIELD>", "<FILL_THIS_FIELD>"],
   "enable_local_script_checks": true,
   "log_level": "INFO",
   "client_addr": "0.0.0.0",
   "bind_addr": "0.0.0.0",
-  "advertise_addr": "<FILL_IT>",
-  "node_name": "<FILL_IT>",
+  "advertise_addr": "<FILL_THIS_FIELD>",
+  "node_name": "<FILL_THIS_FIELD>",
   "disable_update_check": true,
   "enable_script_checks": true
 }

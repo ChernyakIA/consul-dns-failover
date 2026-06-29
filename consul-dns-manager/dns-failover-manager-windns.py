@@ -550,7 +550,14 @@ def main() -> int:
 
     # Only finalize updates in Consul KV tracking if all updates pass without failures
     if errors == 0:
-        state_store.save_active_records(current_managed_list)
+        prev_sorted = sorted(previous_managed, key=lambda x: x.get("fqdn", ""))
+        curr_sorted = sorted(current_managed_list, key=lambda x: x.get("fqdn", ""))
+        
+        # Compare a domain list without taking timespamps into account
+        if prev_sorted == curr_sorted:
+            log.info("The list of managed domains hasn't changed. Skipping the registry update in Consul KV.")
+        else:
+            state_store.save_active_records(current_managed_list)
         return 0
     else:
         log.error("State synchronization loop completed with (%d) error(s). Execution state catalog updates in Consul KV skipped.", errors)

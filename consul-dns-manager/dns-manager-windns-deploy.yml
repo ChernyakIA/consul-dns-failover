@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: dns-manager-windns
-  namespace: <FILL_IT>
+  namespace: <FILL_THIS_FIELD>
   labels:
     app: dns-manager-windns
     app.kubernetes.io/name: dns-manager-windns
@@ -30,7 +30,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: consul-template
-        image: <FILL_IT>
+        image: <FILL_THIS_FIELD>
         args: ["-config=/etc/consul-template/config.hcl"]
         env:
         - name: DNS_PROVIDER_NAME

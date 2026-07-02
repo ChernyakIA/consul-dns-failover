@@ -16,9 +16,7 @@ Current DNS-provider support:
 
 - [End-to-End Architecture](#end-to-end-architecture)
 - [Componentsn](#components)
-- [Component 1: Consul Service Manager](#component-1-consul-service-manager)
-- [Component 2: Consul DNS Manager](#component-2-consul-dns-manager)
-- [Global Deployment Process](#global-deployment-process)
+- [Global Deployment Workflow](#global-deployment-workflow)
 
 ## End-to-End Architecture
 

@@ -173,7 +173,7 @@ class ConsulStateStore:
             payload = json.dumps(payload_dict, indent=2, ensure_ascii=False)
             r = self.session.put(url, data=payload, timeout=5)
             r.raise_for_status()
-            log.info("Active domain registry successfully synchronized inside Consul KV. Timestamp: %s", now_str)
+            log.warning("Active domain registry successfully synchronized inside Consul KV. Timestamp: %s", now_str)
         except Exception as e:
             log.error("Failed to persist state inside Consul KV: %s", e)
 

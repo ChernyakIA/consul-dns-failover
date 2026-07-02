@@ -13,6 +13,7 @@ Current DNS-provider support:
 - [Directory Structure](#directory-structure)
 - [Envs](#envs)
 - [Deployment](#deployment)
+- [Alerts](#alerts)
 
 ## Architecture
 
@@ -112,3 +113,7 @@ Microsoft Active Directory DNS SSH Settings
 3. Deploy to k8s cluster.
 
     `k apply -f $PATH_TO_MANIFESTS`
+
+## Alerts
+
+The file `consul-dns-manager/alerts/loki-alertmanager-alerts.yml` contains an example of alers for the service. These are intended for use in Alertmanager.

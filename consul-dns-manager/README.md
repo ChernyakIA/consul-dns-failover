@@ -16,7 +16,7 @@ Current DNS-provider support:
 
 ## Architecture
 
-```html
+```text
 [ Consul Service Registry ]
     │
     │ (Consul Template watch index)

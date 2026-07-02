@@ -393,7 +393,7 @@ def reconcile_one(api: SelectelDNS,
                  svc, fqdn, rtype, ips, ttl)
         return
 
-    log.info("[%s] %s %s: patching record (ttl: %s->%s, ips: %s->%s)",
+    log.warning("[%s] %s %s: patching record (ttl: %s->%s, ips: %s->%s)",
              svc, fqdn, rtype, cur_ttl, ttl, cur_ips, ips)
     api.patch(zone_id, existing["id"], ttl, ips)
 

@@ -2,24 +2,27 @@
 """
 DNS-Failover daemon.
 
-1. Читает yaml-файл `kv/dev-dns-failover/config` из Consul KV.
-2. Фильтрует записи, относящиеся только к текущему SITE (Имени инстанса)
-3. Регистрирует, обновляет и удаляет health-checks в локальном Consul-агенте
+1. Reads the yaml-file `kv/dev-dns-failover/config` from Consul KV.
+2. Filters records, related only to the current SITE (Instance name)
+3. REgisters, updates and deletes health-checks in the local Consul Agent.
 
-Переменные:
-    SITE                    имя демона (обязательно)
-    NODE_NAME               имя хоста. На случай нескольких демонов в HA
-    SERVICE_NAME_PREFIX     префикс имени сервисов
-    CONSUL_ADDR             урл агента (по умолчанию: http://127.0.0.1:8500)
-    CONSUL_HTTP_TOKEN       ACL-токен Consul (если ACL включены)
-    CONSUL_KV_PATH          путь к yaml-файлу-конфигу в Consul хранилище
-    BLOCKING_WAIT           время на блокировку очереди (по умолчанию 5м)
-    HTTP_TIMEOUT_BLOCKING   HTTP-таймаут для blocking-query (по умолчанию: 330с)
-    ALLOW_EMPTY_BOOTSTRAP   можно ли сносить managed-сервисы при пустом конфиге на холодном старте (по умолчанию: false)
-    LOG_LEVEL               уровень логирования (по умолчанию INFO)
-    MANAGED_TAG             тег для регистрируемых сервисов
+Variables:
+  Required:
+    SITE                    daemon name
+    NODE_NAME               host name. In case of multiple daemons in HA
+    SERVICE_NAME_PREFIX     service name prefix
+    CONSUL_KV_PATH          path to the yaml config file in the Consul store
+    MANAGED_TAG             tag for registered services
 
-Consul-агент должен запускаться с опцией `enable_local_script_checks = true`, иначе скриптовые проверки скрытно не будут работать.
+  Optional:
+    CONSUL_ADDR             agent url (default: http://127.0.0.1:8500)
+    CONSUL_HTTP_TOKEN       Consul ACL token (if ACLs are enabled)
+    BLOCKING_WAIT           blocking query wait time (default 5m)
+    HTTP_TIMEOUT_BLOCKING   HTTP timeout for blocking query (default: 330s)
+    ALLOW_EMPTY_BOOTSTRAP   whether to allow automatic deregistration of managed services on cold start with an empty config (default: false)
+    LOG_LEVEL               logging level (default INFO)
+
+The Consul agent must be started with the `enable_local_script_checks = true` option, otherwise script checks will silently fail.
 """
 from __future__ import annotations
 
@@ -40,14 +43,24 @@ from types import FrameType
 from typing import Any, Dict, Optional, Set, Tuple
 
 # --------------------------------------------------------------------------- #
-# Конфигурация                                                                #
+# Logging Setup                                                               #
 # --------------------------------------------------------------------------- #
-# SlugHelper для zone_name
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
+    stream=sys.stdout,
+)
+log = logging.getLogger("consul-service-manager")
+
+# --------------------------------------------------------------------------- #
+# Configuration                                                               #
+# --------------------------------------------------------------------------- #
+# SlugHelper for zone_name
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
 
 def _envbool(name: str, default: bool) -> bool:
-    """Безопасный парсинг bool из переменных окружения."""
+    """Safely parse bool from environment variables."""
     v = os.environ.get(name)
     if v is None:
         return default
@@ -75,14 +88,14 @@ class Config:
     @staticmethod
     def from_env() -> Config:
         if "SITE" not in os.environ:
-            raise KeyError("Определите переменную окружения 'SITE'.")
+            raise KeyError("Environment variable 'SITE' must be set.")
         site = os.environ["SITE"]
         node_name = os.environ.get("NODE_NAME")
         
         scope_tag = f"daemon-site-{site}-node-{node_name}"
         consul_kv_path = os.environ.get("CONSUL_KV_PATH")
         if not consul_kv_path:
-            raise KeyError("Определите переменную окружения 'CONSUL_KV_PATH'.")
+            raise KeyError("Environment variable 'CONSUL_KV_PATH' must be set.")
         
         return Config(
             site=site,
@@ -98,22 +111,12 @@ class Config:
             http_timeout_short=10,
             allow_empty_bootstrap=_envbool("ALLOW_EMPTY_BOOTSTRAP", False)
         )
-    
-# --------------------------------------------------------------------------- #
-# Логирование                                                                 #
-# --------------------------------------------------------------------------- #
-logging.basicConfig(
-    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
-    stream=sys.stdout,
-)
-log = logging.getLogger("consul-service-manager")
 
 # --------------------------------------------------------------------------- #
-# Управление завершением работы                                               #
+# Shutdown Management                                                         #
 # --------------------------------------------------------------------------- #
 class Shutdown:
-    """Флаг корректного завершения работы, не прерывая транзакции"""
+    """Graceful shutdown flag, ensures transactions are not interrupted."""
 
 
     def __init__(self) -> None:
@@ -124,12 +127,12 @@ class Shutdown:
 
 
     def _handle(self, signum: int, frame: Optional[FrameType]) -> None:
-        log.info("Получил сигнал %d, корректно завершаю работу ...", signum)
+        log.info("Received signal %d, shutting down gracefully...", signum)
         self.stop = True
 
 
     def sleep(self, seconds: float) -> None:
-        # Режим ожидания. Выходим из него, если было запрошено завершение работы
+        # Wait mode. Break out if a shutdown has been requested
         deadline = time.monotonic() + seconds
         while not self.stop:
             remaining = deadline - time.monotonic()
@@ -138,12 +141,12 @@ class Shutdown:
             time.sleep(min(0.5, remaining))
 
 # --------------------------------------------------------------------------- #
-# Читаем yaml-файл, формируем объект и правила проверки                       #
+# Parse YAML file, build object and check rules                               #
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class DesiredService:
     """
-    Чертёж сервиса. Преобразует YAML в формат Consul и генерирует уникальный ID
+    Service blueprint. Converts YAML to Consul format and generates a unique ID.
     """
     service_id: str
     name: str
@@ -155,7 +158,7 @@ class DesiredService:
 
 
     def config_hash(self) -> str:
-        """SHA256 от всех полей, влияющих на поведение сервиса/чека."""
+        """SHA256 from all fields determining the service/check behavior."""
         material = {
             "name":    self.name,
             "address": self.address,
@@ -163,7 +166,7 @@ class DesiredService:
             "check":   self.check,
             "meta":    {k: v for k, v in self.meta.items() if k != "config_hash"},
         }
-        # sort_keys=True гарантирует детерминированность
+        # sort_keys=True guarantees determinism
         blob = json.dumps(material, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -178,8 +181,8 @@ class DesiredService:
         ep: Dict[str, Any],
         defaults: Optional[Dict[str, Any]] = None) -> DesiredService:
         """
-        Трансформирует секцию из YAML в объект DesiredService.
-        Приоритет: endpoints > records > defaults.
+        Transforms a YAML section into a DesiredService object.
+        Priority: endpoints > records > defaults.
         """
         defaults = defaults or {}
         def_check = (defaults.get("check") or {})
@@ -189,9 +192,9 @@ class DesiredService:
         fallback = record_dict.get("fallback_ip", "")
 
         if on_fail not in ("keep", "remove", "fallback"):
-            raise ValueError(f"on_all_fail={on_fail!r} некорректно")
+            raise ValueError(f"on_all_fail={on_fail!r} is invalid")
         if on_fail == "fallback" and not fallback:
-            raise ValueError(f"on_all_fail=fallback требует fallback_ip")
+            raise ValueError(f"on_all_fail=fallback requires fallback_ip")
         
         ip        = ep["ip"]
         uplink_provider = ep["uplink_provider"]
@@ -200,25 +203,25 @@ class DesiredService:
         sites     = ep.get("sites") or []
         num_sites = len(sites)
 
-        # Приоритет: endpoints (ep) > records (record_dict) > defaults
+        # Priority: endpoints (ep) > records (record_dict) > defaults
         raw_quorum = ep.get("quorum")
         if raw_quorum is None:
             raw_quorum = defaults.get("quorum")
         if raw_quorum is None:
-            raise ValueError(f"Значение для кворума не задано ни на одном уровне для endpoint={ip}, record={record}")
+            raise ValueError(f"A quorum value is not defined at any level for endpoint={ip}, record={record}")
         try:
             quorum = int(raw_quorum)
         except (ValueError, TypeError) as err:
-            raise ValueError(f"Некорректный формат значения quorum: {raw_quorum!r}. Нужен int.") from err
+            raise ValueError(f"Invalid quorum value format: {raw_quorum!r}. Expected int.") from err
         if quorum < 1:
-            raise ValueError(f"Значение quorum должно быть >= 1, а передано {quorum}")
+            raise ValueError(f"The quorum value must be >= 1, but got {quorum}")
         if quorum > num_sites:
-            raise ValueError(f"quorum={quorum} не может быть больше кол-ва sites {num_sites} для эндпоинта {record} {ip}")
+            raise ValueError(f"quorum={quorum} cannot be greater than the number of sites {num_sites} for endpoint {record} {ip}")
 
         interval = chk.get("interval", def_check.get("interval"))
         timeout  = chk.get("timeout", def_check.get("timeout"))
         if not interval:
-            raise ValueError(f"check.interval/timeout не заданы для endpoint={ep!r}")
+            raise ValueError(f"check.interval/timeout not set for endpoint={ep!r}")
         dereg    = chk.get("deregister_critical_after", def_check.get("deregister_critical_after"))
         kind     = chk["kind"].lower()
 
@@ -237,25 +240,25 @@ class DesiredService:
 
         if fbc_val is not None:
             if fbw_val is not None:
-                # fbc в yaml-конфиге -- количество проверок после warning
-                # Для Consul мы преобразуем его по формуле int(warning) + int(critical)
+                # fbc in the yaml config is the number of checks after warning
+                # For Consul, we convert it using the formula int(warning) + int(critical)
                 consul_absolute_fbc = fbw_val + fbc_val
                 base_check["FailuresBeforeCritical"] = consul_absolute_fbc
                 
                 log.debug(
-                    "Для записи %s в конфиге выставлено проверок до warning=%d, добавляем кол-во critical=%d и передаем в Consul FailuresBeforeCritical=%d",
+                    "For record %s, the config has checks before warning=%d, adding critical=%d and passing FailuresBeforeCritical=%d to Consul",
                     record, fbw_val, fbc_val, consul_absolute_fbc
                 )
             else:
-                # Если warning не задан, то fbc_val -- это число сбоев сразу до critical
+                # If warning is not set, then fbc_val is the number of failures directly until critical
                 base_check["FailuresBeforeCritical"] = fbc_val
 
-        # "0s" и пустую строку Consul понимает как "никогда не дерегистрировать"
+        # Consul treats "0s" and an empty string as "never deregister"
         if dereg and dereg != "0s":
             base_check["DeregisterCriticalServiceAfter"] = dereg
         
         # --------------------------------------------------------------------------- #
-        # Проверки                                                                    #
+        # Checks                                                                      #
         # --------------------------------------------------------------------------- #
         if kind == "tcp":
             port = chk.get("port")
@@ -266,7 +269,7 @@ class DesiredService:
 
         elif kind == "smtp":
             port = chk.get("port", 25)
-            timeout_sec = 5  # таймаут в сек для netcat
+            timeout_sec = 5  # timeout in seconds for netcat
             if timeout:
                 match = re.match(r"(\d+)", str(timeout))
                 if match:
@@ -289,15 +292,15 @@ class DesiredService:
                     path = "/" + path
                 url = f"{scheme}://{target}:{port}{path}"
             check = {**base_check, "HTTP": url, "Method": chk.get("method", "GET"),}
-            # опционально header, tls_skip_verify
+            # Optional header, tls_skip_verify
             if "header" in chk:
                 check["Header"] = chk["header"]
             if chk.get("tls_skip_verify"):
                 check["TLSSkipVerify"] = True
         else:
-            raise ValueError(f"Неизвестное значение check.kind={kind!r}")
+            raise ValueError(f"Unknown value for check.kind={kind!r}")
         
-        # точки ломают dns-имена в Consul
+        # Dots break dns names in Consul
         zone_slug = _slug(zone_name)
         record_slug = _slug(record)
         dns_prov_slug = _slug(dns_provider)
@@ -324,7 +327,7 @@ class DesiredService:
             "on_all_fail": on_fail,
             "fallback_ip": fallback,
             "quorum": str(quorum),
-            **provider_meta  # Динамические поля провайдеров == новые поля попадают сюда
+            **provider_meta  # Dynamic provider fields == new fields go here
         }
         return DesiredService(sid, name, ip, tuple(tags), check, kind, meta)
 
@@ -343,14 +346,14 @@ class DesiredService:
 
 def _has_drift(current: Dict[str, Any], desired: DesiredService) -> bool:
     """
-    True -> перегистрируем.
+    True -> re-register.
 
-    Сравниваем config_hash из Meta. Если хэша нет (старый сервис, до апгрейда
-    демона), то считаем drift и регистрируем заново, чтобы записать хэш.
+    Comparing the config_hash from Meta. If there is no hash (an old service,
+    pre-upgrade daemon), consider it a drift and re-register to add the hash.
     """
     current_hash = (current.get("Meta") or {}).get("config_hash")
     if not current_hash:
-        log.info("У сервиса id=%s нет config_hash — миграция, регистрируем заново",
+        log.info("Service id=%s has no config_hash — migrating, re-registering",
                  current.get("ID"))
         return True
     return current_hash != desired.config_hash()
@@ -358,17 +361,17 @@ def _has_drift(current: Dict[str, Any], desired: DesiredService) -> bool:
 
 def _slug(value: str) -> str:
     """
-    Приводит строку к виду, безопасному для Consul: оставляем [A-Za-z0-9_-],
-    всё остальное изменяем на '-'.
-    Пример: 'dev-rezonit.ru' -> 'dev-rezonit-ru'.
+    Sanitizes strings making them safe for Consul: keeps [A-Za-z0-9_-],
+    everything else is replaced with '-'.
+    Example: 'dev-rezonit.ru' -> 'dev-rezonit-ru'.
     """
     return _SLUG_RE.sub("-", value).strip("-")
 
 # --------------------------------------------------------------------------- #
-# Consul HTTP-клиент                                                          #
+# Consul HTTP Client                                                          #
 # --------------------------------------------------------------------------- #
 class KVUnavailable(Exception):
-    """Consul KV временно недоступен (сеть/5xx). Reconcile не выполнять."""
+    """Consul KV is temporarily unavailable (network/5xx). Do not perform reconcile."""
 
 
 def _raise_with_body(r: requests.Response, what: str) -> None:
@@ -384,21 +387,21 @@ class ConsulClient:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.base_url = cfg.consul_addr.rstrip("/")
-        # Sessions повторно использует tcp-соединения
+        # Sessions reuse underlying tcp connections
         self.session = requests.Session()
-        # Стандартный заголовок ACL-токена Consul
-        # Если ACL не включены, агент просто игнорирует заголовок
+        # Standard Consul ACL token header
+        # If ACL is disabled, the agent simply ignores the header
         if cfg.consul_http_token:
             self.session.headers["X-Consul-Token"] = cfg.consul_http_token
-            log.info("Используем ACL-токен из CONSUL_HTTP_TOKEN (len=%d)", len(cfg.consul_http_token))
+            log.info("Using ACL token from CONSUL_HTTP_TOKEN (len=%d)", len(cfg.consul_http_token))
         else:
-            log.debug("CONSUL_HTTP_TOKEN не задан -- работаем без ACL-токена")
+            log.debug("CONSUL_HTTP_TOKEN is not set -- working without an ACL token")
 
 
     def deregister(self, service_id: str) -> None:
         r = self.session.put(f"{self.base_url}/v1/agent/service/deregister/{service_id}",
                              timeout=self.cfg.http_timeout_short)
-        _raise_with_body(r, f"Дерегистрируем id={service_id}")
+        _raise_with_body(r, f"Deregistering id={service_id}")
 
 
     def agent_self(self) -> Dict[str, Any]:
@@ -407,17 +410,17 @@ class ConsulClient:
         return r.json()
 
 
-    # Читаем KV
+    # Read KV
     def kv_read(self, key: str, index: Optional[int], wait: Optional[str]) -> Tuple[Optional[str], int]:
         """
-        Возвращает (value, new_index)
-        value = None -- http 404 (файла на пути нет), состояние "конфиг удалён"
-        value = "" -- файл пуст
-        value = "..." -- ок
+        Returns (value, new_index)
+        value = None -- http 404 (file not found), effectively "config deleted"
+        value = "" -- file is empty
+        value = "..." -- ok
 
-        Поднимает
-        requests.exceptions.ReadTimeout -- blocking-query истёк -- ок
-        KVUnvailable -- при любой другой ошибке
+        Raises:
+        requests.exceptions.ReadTimeout -- blocking query timed out -- ok
+        KVUnavailable -- on any other error
         """
         params: Dict[str, str] = {}
         if wait:
@@ -433,8 +436,8 @@ class ConsulClient:
         except requests.exceptions.ReadTimeout:
             raise
         except requests.exceptions.RequestException as e:
-            # ConnectionError, DNS, прочее
-            raise KVUnavailable(f"Сетевая ошибка до Consul KV: {e}") from e
+            # ConnectionError, DNS, other
+            raise KVUnavailable(f"Network error reaching Consul KV: {e}") from e
         
         new_index = int(r.headers.get("X-Consul-Index", "0"))
 
@@ -442,12 +445,12 @@ class ConsulClient:
             return None, new_index
 
         if r.status_code >= 500:
-            raise KVUnavailable(f"Consul вернул {r.status_code}: {r.text[:200]}")
+            raise KVUnavailable(f"Consul returned {r.status_code}: {r.text[:200]}")
 
         try:
             r.raise_for_status()
         except requests.exceptions.RequestException as e:
-            raise KVUnavailable(f"HTTP-ошибка: {e}") from e
+            raise KVUnavailable(f"HTTP error: {e}") from e
 
         body = r.json()
         if not body:
@@ -458,17 +461,17 @@ class ConsulClient:
         return base64.b64decode(raw).decode("utf-8"), new_index
 
 
-    # Список сервисов
+    # List of services
     def list_managed_services(self) -> Dict[str, Dict[str, Any]]:
-        # Список сервисов через агента. API отличается от обращения к серверу
+        # Fetch services through the agent. API differs from querying the server
         url = f"{self.base_url}/v1/agent/services"
-        # Консул фильтрует на стороне сервера
+        # Consul applies filtering on the server side
         params = {"filter": f'"{self.cfg.managed_tag}" in Tags and "{self.cfg.scope_tag}" in Tags'}
         r = self.session.get(url, params=params, timeout=self.cfg.http_timeout_short)
         r.raise_for_status()
         services: Dict[str, Dict[str, Any]] = r.json() or {}
         
-        # Проверка тега, если фильтр на стороне сервера не отработал
+        # Tag check fallback in case server-side filtering didn't trigger
         return {
             sid: svc
             for sid, svc in services.items()
@@ -477,41 +480,41 @@ class ConsulClient:
 
 
     def register(self, payload: Dict[str, Any]) -> None:
-        """Регистрация сервиса через агента"""
-        # Регистрация через агента отличается от регистрации напрямую на сервере
+        """Registering the service via agent"""
+        # Registration through the agent is different from direct server registration
         url = f"{self.base_url}/v1/agent/service/register"
         r = self.session.put(url, json=payload, params={"replace-existing-checks": "true"},
                              timeout=self.cfg.http_timeout_short)
         _raise_with_body(r, f"register id={payload.get('ID')}")
 
 # --------------------------------------------------------------------------- #
-# Парсим конфиг. Проверяем, что он корректный                                 #
+# Parse Config. Validation Checks                                             #
 # --------------------------------------------------------------------------- #
 def parse_desired_state(yaml_text: str, cfg: Config) -> Dict[str, DesiredService]:
-    """Парсим yaml-строку в {service_id: DesiredService}. С проверкой на ошибки."""
+    """Parse yaml string into {service_id: DesiredService} with error checking."""
     if not yaml_text or not yaml_text.strip():
         return {}
     try:
         doc = yaml.safe_load(yaml_text) or {}
     except yaml.YAMLError as e:
-        log.error("Ошибка в YAML: %s. Предыдущее состояние осталось пустым.", e)
+        log.error("YAML error: %s. Previous state remains untouched.", e)
         return {}
 
     defaults = doc.get("defaults") or {}
-    # Задаем ключевые константные поля схемы, чтобы отсечь их от метаданных провайдеров
+    # Define key constant schema fields to separate them from provider metadata
     KNOWN_ZONE_KEYS = {"zone_name", "dns_provider", "records"}
 
     desired: Dict[str, DesiredService] = {}
-    # Проходим по всем зонам в конифге
+    # Iterate through all zones in config
     for i, zone in enumerate(doc.get("zones", []) or []):
         zone_name = zone.get("zone_name")
         dns_provider = zone.get("dns_provider")
 
         if not zone_name or not dns_provider:
-            log.error("В блоке #%d в файле конфигурации не указан zone_name или dns_provider. Пропуск всей зоны", i)
+            log.error("Block #%d in the configuration file is missing zone_name or dns_provider. Skipping the entire zone", i)
             continue
 
-        # Всё, что не входит в KNOWN_ZONE_KEYS, объявляется параметром провайдера -- заносится в meta
+        # Everything not in KNOWN_ZONE_KEYS is considered a provider parameter -- pushed to meta
         provider_meta: Dict[str, str] = {
             k: str(v)
             for k, v in zone.items()
@@ -521,17 +524,17 @@ def parse_desired_state(yaml_text: str, cfg: Config) -> Dict[str, DesiredService
         for record in zone.get("records", []) or []:
             rec_name = record.get("name")
             if not rec_name:
-                log.warning("zone=%s: запись без значения name. Пропускаем", zone_name)
+                log.warning("zone=%s: record without a name value. Skipping", zone_name)
                 continue
             for ep in record.get("endpoints", []) or []:
                 sites = ep.get("sites")
-                # Если site в yaml-конфиге указан не этого демона, то пропускаем
+                # If site in the yaml config is not for this daemon, skip it
                 if not sites or cfg.site not in sites:
                     continue
                 ip = ep.get("ip")
                 check_proto = ep.get("check")
                 if not ip or not check_proto:
-                    log.warning("zone=%s record=%s: пропущен ip / check. Пропускаем %r",
+                    log.warning("zone=%s record=%s: missing ip / check. Skipping %r",
                                 zone_name, rec_name, ep)
                     continue
                 try:
@@ -545,29 +548,29 @@ def parse_desired_state(yaml_text: str, cfg: Config) -> Dict[str, DesiredService
                         defaults=defaults
                     )
                 except (ValueError, KeyError, TypeError) as e:
-                    log.error("zone=%s record=%s endpoint=%r: ошибка парсинга (%s: %s) -- пропускаем",
+                    log.error("zone=%s record=%s endpoint=%r: parsing error (%s: %s) -- skipping",
                               zone_name, rec_name, ep, type(e).__name__, e)
                     continue
                 if ds.service_id in desired:
-                    log.warning("Дубликат service_id=%s, перезаписываем", ds.service_id)
+                    log.warning("Duplicate service_id=%s, overwriting", ds.service_id)
                 desired[ds.service_id] = ds
     return desired
 
 # --------------------------------------------------------------------------- #
-# Согласование сервисов                                                       #
+# Service Reconciliation                                                      #
 # --------------------------------------------------------------------------- #
 def reconcile(consul: ConsulClient, desired: Dict[str, DesiredService]) -> bool:
     """
-    Согласуем разницу. Не вызывает исключение -- логируем и продолжаем
-    Возвращает:
-    - True, если все операции прошли успешно
-    - False, если хотя бы одна [de]register прошла не успешно
-    Главный цикл по этому флагу решает, двигать ли last_index
+    Reconcile differences. Does not raise exceptions -- logs them and continues
+    Returns:
+    - True, if all operations completed successfully
+    - False, if at least one [de]register failed
+    The main loop relies on this flag to determine whether to advance last_index
     """
     try:
         current = consul.list_managed_services()
     except requests.RequestException as e:
-        log.error("Ошибка вывода текущих сервисов у агента: %s", e)
+        log.error("Error fetching current services from agent: %s", e)
         return False
     
     current_ids: Set[str] = set(current.keys())
@@ -577,49 +580,49 @@ def reconcile(consul: ConsulClient, desired: Dict[str, DesiredService]) -> bool:
     to_remove   = current_ids - desired_ids
     to_keep     = desired_ids & current_ids
 
-    log.info("Согласование. Желаемое=%d, текущее у Агента=%d, добавляем=%d, удаляем=%d, сохраняем=%d",
+    log.info("Reconciliation. Desired=%d, Current in Agent=%d, Adding=%d, Removing=%d, Keeping=%d",
              len(desired_ids), len(current_ids), len(to_add), len(to_remove), len(to_keep))
 
     all_ok = True
 
-    # Регистрируем новый
+    # Registering new
     for sid in sorted(to_add):
         ds = desired[sid]
         try:
             consul.register(ds.to_payload())
-            log.info("Зарегистрированный сервис id=%s name=%s address=%s check=%s",
+            log.warning("Registered service id=%s name=%s address=%s check=%s",
                      ds.service_id, ds.name, ds.address, ds.check_proto)
         except requests.RequestException as e:
-            log.error("Регистрация id=%s провалилась: %s", sid, e)
+            log.error("Registration of id=%s failed: %s", sid, e)
             all_ok = False
 
-    # Дрифт
-    # Перегистрируем текущие сервисы, ели изменился config_hash.
-    # ID сервиса не меняется
+    # Drift Handling
+    # Re-register current services if config_hash changed.
+    # The Service ID remains the same
     for sid in sorted(to_keep):
         ds = desired[sid]
         if _has_drift(current[sid], ds):
             try:
                 consul.register(ds.to_payload())
-                log.info("Перерегистрирован сервис в дрифте id=%s", sid)
+                log.info("Re-registered drifted service id=%s", sid)
             except requests.RequestException as e:
-                log.error("Перерегистрация id=%s провалилась: %s", sid, e)
+                log.error("Re-registration of id=%s failed: %s", sid, e)
                 all_ok = False
 
-    # Удаляем устаревшие ID
+    # Remove obsolete IDs
     for sid in sorted(to_remove):
         try:
             consul.deregister(sid)
-            log.info("Дерегистрация устаревшего сервиса id=%s", sid)
+            log.warning("Deregistered obsolete service id=%s", sid)
         except requests.RequestException as e:
-            log.error("Дерегистрация id=%s провалилась: %s", sid, e)
+            log.error("Deregistration of id=%s failed: %s", sid, e)
             all_ok = False
     
     return all_ok
 
 # --------------------------------------------------------------------------- #
-# Проверка подключения к Consul                                               #
-# Docker compose может запустить демон быстрее чем агент откроет 8500         #
+# Checking Connection to Consul                                               #
+# Docker compose may start the daemon faster than the agent exposes port 8500 #
 # --------------------------------------------------------------------------- #
 def wait_for_consul(consul: ConsulClient, shutdown: Shutdown) -> None:
     backoff = consul.cfg.backoff_base
@@ -627,26 +630,26 @@ def wait_for_consul(consul: ConsulClient, shutdown: Shutdown) -> None:
         try:
             info = consul.agent_self()
             agent_cfg = info.get("Config", {})
-            log.info("Локальный Consul-агент доступен (node=%s dc=%s version=%s)",
+            log.info("Local Consul agent is available (node=%s dc=%s version=%s)",
                      agent_cfg.get("NodeName", "?"), agent_cfg.get("Datacenter", "?"), agent_cfg.get("Version", "?"),)
             return
         except requests.RequestException as e:
-            log.warning("Consul-агент пока не доступен: %s (повтор через %.1fс)",
+            log.warning("Consul agent not yet available: %s (retrying in %.1fs)",
                         e, backoff)
         shutdown.sleep(backoff)
         backoff = min(backoff * 2, consul.cfg.backoff_cap)
 
 # --------------------------------------------------------------------------- #
-# Главный цикл                                                                #
+# Main Loop                                                                   #
 # --------------------------------------------------------------------------- #
 def main() -> int:
     try:
         cfg = Config.from_env()
     except Exception as e:
-        log.error("Ошибка инициализации конфигурации окружения: %s", e)
+        log.error("Environment configuration initialization error: %s", e)
         return 1
     
-    log.info("Стартуем DNS-Failover Control Plane (consul=%s, kv=%s, wait=%s, allow_empty_bootstrap=%s)",
+    log.info("Starting DNS-Failover Control Plane (consul=%s, kv=%s, wait=%s, allow_empty_bootstrap=%s)",
              cfg.consul_addr, cfg.consul_kv_path, cfg.blocking_wait, cfg.allow_empty_bootstrap)
     shutdown = Shutdown()
     consul = ConsulClient(cfg)
@@ -655,8 +658,8 @@ def main() -> int:
     if shutdown.stop:
         return 0
     
-    # 1. Синкаем стейт. Чтение без блокировки
-    log.info("Шаг 1. Первичная синхронизация состояния")
+    # 1. Syncing state. Reading without blocks initially
+    log.info("Step 1. Initial state synchronization")
     last_index: int = 0
     backoff = cfg.backoff_base
     
@@ -664,54 +667,54 @@ def main() -> int:
         try:
             value, new_index = consul.kv_read(cfg.consul_kv_path, index=last_index, wait=cfg.blocking_wait)
         
-        # порядок Exception важен!
-        # ReadTimeout -- подкласс RequestException, который подкласс ConnectionError'а.
-        # Если поменять местами blocking-query таймаут будет ошибочно приниматься за сбой и запускать backoff.
-        # Consul держит blocking-query на (wait + wait/16)сек = 5мин + 18.75сек
-        # HTTP_TIMEOUT_BLOCKING=330s должен быть обязательно больше!
+        # Exception order matters!
+        # ReadTimeout is a subclass of RequestException, which is a subclass of ConnectionError.
+        # If swapped, blocking query timeouts would erroneously trigger backoff handling.
+        # Consul holds the blocking-query for (wait + wait/16)sec = 5min + 18.75sec
+        # HTTP_TIMEOUT_BLOCKING=330s must be strictly larger than that!
         # https://developer.hashicorp.com/consul/api-docs/features/blocking
 
         except requests.exceptions.ReadTimeout:
-            log.debug("Blocking query истёк по таймауту (норма), переподключаемся")
+            log.debug("Blocking query timed out (normal), reconnecting")
             continue
 
         except KVUnavailable as e:
-            # Consul KV недоступен -> ничего не дерегистрируем, last_index сохраняем
-            log.error("KV недоступен: %s (повтор через %.1fс)", e, backoff)
+            # Consul KV inaccessible -> do not deregister anything, preserve last_index
+            log.error("KV unavailable: %s (retrying in %.1fs)", e, backoff)
             shutdown.sleep(backoff)
             backoff = min(backoff * 2, cfg.backoff_cap)
             continue
 
         except Exception as e:
-            log.exception("Неожиданная ошибка: %s", e)
+            log.exception("Unexpected error: %s", e)
             shutdown.sleep(backoff)
             backoff = min(backoff * 2, cfg.backoff_cap)
             continue
 
-        # Чтение успешно -- решаем, что делать с результатом
+        # Processing successful read result
         config_missing = value is None
         desired = ({} if config_missing else parse_desired_state(value, cfg))
 
         if config_missing:
-            log.warning("KV-файл %s отсутствует (HTTP 404).", cfg.consul_kv_path)
+            log.warning("KV file %s is missing (HTTP 404).", cfg.consul_kv_path)
         elif not desired:
-            log.warning("KV-файл %s прочитан, но желаемых сервисов для site=%s = 0.",
+            log.warning("KV file %s loaded, but desired services for site=%s = 0.",
                         cfg.consul_kv_path, cfg.site)
         else:
-            log.info("Конфиг прочитан (index=%d), желаемых сервисов для site=%s: %d",
+            log.info("Config loaded (index=%d), desired services for site=%s: %d",
                      new_index, cfg.site, len(desired))
             
-        # Защита на холодном старте:
-        # при пустом/удалённом конфиге не дерегистрируем существующие managed-сервисы,
-        # а ждём появления валидного конфига. Снимается флагом ALLOW_EMPTY_BOOTSTRAP=true.
+        # Cold start protection:
+        # Avoid deregistering existing managed services when an empty/deleted config is detected.
+        # Can be bypassed via ALLOW_EMPTY_BOOTSTRAP=true flag.
         if not desired and not cfg.allow_empty_bootstrap:
             log.warning(
-                "Bootstrap: желаемое состояние пусто, ALLOW_EMPTY_BOOTSTRAP=false -- "
-                "пропускаем reconcile, чтобы не снести managed-сервисы. "
-                "Жду валидный конфиг в KV (index=%d) ...",
+                "Bootstrap: desired state is empty, ALLOW_EMPTY_BOOTSTRAP=false -- "
+                "skipping reconcile to prevent purging managed services. "
+                "Waiting for a valid config in KV (index=%d) ...",
                 new_index,
             )
-            # Двигаем индекс, иначе следующая итерация снова вернётся мгновенно
+            # Advance the index, preventing instant loops on the next iteration
             last_index = new_index
             backoff = cfg.backoff_base
             shutdown.sleep(2.0)
@@ -722,20 +725,20 @@ def main() -> int:
             backoff = cfg.backoff_base
             break
         else:
-            # Часть операций провалилась -- индекс не двигаем, повторим bootstrap после backoff.
-            log.warning("Первичная синхронизация выполнена с ошибками, повторяем через %.1fс",
+            # Reconcile partially failed -- leaving index unshifted, retry bootstrap over backoff.
+            log.warning("Initial synchronization had errors, retrying in %.1fs",
                         backoff)
             shutdown.sleep(backoff)
             backoff = min(backoff * 2, cfg.backoff_cap)
             continue
 
     if shutdown.stop:
-        log.info("Shutdown во время bootstrap")
+        log.info("Shutdown during bootstrap")
         return 0
     
-    # last_index здесь = X-Consul-Index ключа на момент bootstrap.
-    # Шаг 2 использует его как стартовую точку blocking-query.
-    log.info("Шаг 2. Выставляем дозор за KV (стартовый index=%d)", last_index)
+    # Context: last_index equals X-Consul-Index of the key at the time of bootstrap.
+    # Step 2 utilizes it as a jump-off point for blocking queries.
+    log.info("Step 2. Watching KV (starting index=%d)", last_index)
     backoff = cfg.backoff_base
 
     while not shutdown.stop:
@@ -744,49 +747,49 @@ def main() -> int:
             if new_index < 1:
                 new_index = 1
             if new_index < last_index:
-                log.warning("X-Consul-Index откатился (%d -> %d), сброс таймера",
+                log.warning("X-Consul-Index rolled back (%d -> %d), resetting timer",
                             last_index, new_index)
                 last_index = 0
                 continue
             if new_index == last_index:
-                # Заблокированный запрос вернулся без изменений по таймауту
-                log.debug("У index=%d в KV нет изменений", new_index)
+                # The blocked query returned entirely unchanged via timeout expiration
+                log.debug("No changes in KV for index=%d", new_index)
                 backoff = cfg.backoff_base
                 continue
 
-            log.info("Замечено изменение в KV: индекс %d -> %d, пересогласовываем сервисы ...",
+            log.info("Change detected in KV: index %d -> %d, reconciling services ...",
                      last_index, new_index)
             desired = parse_desired_state(value, cfg) if value is not None else {}
             if value is None:
-                log.warning("Файл конфигурации %s был удалён. Дерегистрируем все связанные сервисы", cfg.consul_kv_path)
+                log.warning("Configuration file %s was deleted. Deregistering all associated services", cfg.consul_kv_path)
             if reconcile(consul, desired):
                 last_index = new_index
                 backoff = cfg.backoff_base
             else:
-                # last_index не двигаем -- следующая итерация повторит reconcile.
-                # При index < real_index Consul вернёт ответ сразу, без блокировки,
-                # но shutdown.sleep(backoff) защищает от спама агентом.
-                log.warning("Reconcile завершился с ошибками, индекс не сдвигаем (повтор через %.1fс)",
+                # Without shifting last_index here, the next loop initiates reconciliation again.
+                # Consul replies instantly (non-blocking) when index < real_index.
+                # shutdown.sleep(backoff) prevents overwhelming the agent locally.
+                log.warning("Reconcile finished with errors, not shifting index (retrying in %.1fs)",
                             backoff)
                 shutdown.sleep(backoff)
                 backoff = min(backoff * 2, cfg.backoff_cap)
 
         except requests.exceptions.ReadTimeout:
-            # На стороне клиента отвал по таймауту, пока сервер удерживал запрос на длительное ожидание ответа
-            # Безопасно перезапустить, last_index не изменять
-            log.debug("Blocking-query отвалилась по таймауту. Переподключаемся")
+            # Client-side timeout triggers while Server keeps holding response query.
+            # Safe to silently restart block. Do not alter last_index limits!
+            log.debug("Blocking query timed out. Reconnecting")
             backoff = cfg.backoff_base
         except requests.RequestException as e:
-            log.error("Ошибка с Consul API: %s (повтор через %.1fс)", e, backoff)
+            log.error("Consul API error: %s (retrying in %.1fs)", e, backoff)
             shutdown.sleep(backoff)
             backoff = min(backoff * 2, cfg.backoff_cap)
         except Exception as e:  # noqa: BLE001 -- main loop must flow
-            log.exception("Неожиданная ошибка в цикле мониторинга: %s (повтор через %.1fс)",
+            log.exception("Unexpected error in watch loop: %s (retrying in %.1fs)",
                           e, backoff)
             shutdown.sleep(backoff)
             backoff = min(backoff * 2, cfg.backoff_cap)
 
-    log.info("Shutdown выполнен")
+    log.info("Shutdown complete")
     return 0
 
 if __name__ == "__main__":

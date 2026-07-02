@@ -16,7 +16,7 @@ It's designed to run alongisde with Consul Agent, continiously monitoring the co
 
 ## Architecture
 
-```html
+```text
 [ Consul Server KV ]
         ▼
         │ (Long-Polling / Blocking Query)
@@ -95,7 +95,7 @@ zones:
       sites: ["host-a", "host-b"]     # Tracking endpoints/daemons which monitor health on targeted routes
       quorum: 2                       # (Optional) Overrides default quorum configuration for this endpoint context. Enforces confirmation constraints <= len(sites)
       check:                          # kinds: icmp -> ping execution; tcp -> {"TCP": "target:port"}; http -> {"HTTP": "uri"}. Optional: tls_skip_verify: bool, custom headers
-        kind: "icmp"                  # Options: icmp (set target) / tcp (set target and port, e.g. 25 for SMTP) / http (set port, path, and method) / smtp (set target, port [defaults to 25])
+        kind: "icmp"                  # Options: icmp (set target) / tcp (set target and port) / http (set port, path, and method) / smtp (set target, port [defaults to 25])
         target: "203.0.113.179"       # Physical check destination (if null, defaults to resolving against the primary endpoint IP)
 
 ## PROVIDER: ACTIVE DIRECTORY / WINDOWS DNS

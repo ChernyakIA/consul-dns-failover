@@ -1,4 +1,4 @@
-# Consul Automated DNS Failover System
+# Consul DNS Failover System
 
 A full-stack, distributed automated DNS failover and monitoring solution powered by HashiCorp Consul. This system continuously tracks critical services, performs distributed health checking, and dynamically reconciles target A records across your DNS-provider systems based on active monitoring data.
 

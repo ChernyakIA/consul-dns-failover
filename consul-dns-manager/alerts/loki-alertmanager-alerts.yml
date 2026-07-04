@@ -4,7 +4,7 @@ groups:
 
   # 1. Active domains registry change
   - alert: DnsManagerConsulRegistryUpdated
-    expr: sum (pod, namespace) (count_over_time({namespace="consul-dev", pod=~"dns-manager-.*"} |= "Active domain registry successfully synchronized inside Consul KV"[1m])) > 0
+    expr: sum (pod, namespace) (count_over_time({namespace="<FILL_THIS_FIELD>", pod=~"dns-manager-.*"} |= "Active domain registry successfully synchronized inside Consul KV"[1m])) > 0
     labels:
       severity: warning
       loki: noresolve
@@ -18,7 +18,7 @@ groups:
     expr: |
       sum by (pod, namespace, domain, old_ips, new_ips) (
           count_over_time(
-          {namespace="consul-dev", pod=~"dns-manager-.*"} 
+          {namespace="<FILL_THIS_FIELD>", pod=~"dns-manager-.*"} 
           |= "патчу ttl" |= "ips"
           | regexp `\] (?P<domain>\S+) A: патчу.*?ips (?P<old_ips>\[.*?\])->(?P<new_ips>\[.*?\])`
           [1m]

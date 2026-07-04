@@ -21,26 +21,31 @@ Current DNS-provider support:
 ## End-to-End Architecture
 
 ```text
-[ Consul Server KV: monitoring-config.yml ]
+[ Consul Server KV / YAML Configuration ]
         │
         │ (Long-Polling / Blocking Query)
         ▼
-[ Consul Service Manager (SITE: host-a) ] ──(Registers dynamically)──► [ Local Consul Agent ]
-        │                                                                       │
-        └── 1. Computes 'config_hash'                                           │
-            2. Identifies configuration drift                                   ▼ (Checks Engine)
-            3. Filters endpoints assigned to SITE                        (ICMP / TCP / HTTP / SMTP)
-                                                                                │
-                                                                                ▼ (Cluster Sync)
-                                                                    [ Consul Service Registry ]
-                                                                                │
-                                                                                │ (Consul-Template watch index)
-                                                                                ▼
-[ External DNS Providers ] ◄──────────────────────────────────────── [ Consul DNS Manager ]
-        ▲                                                                       │
-        │   1. Template filters active service IPs per provider                 │
-        └── 2. Renders unified operational target state to JSON ────────────────┘
-            3. Triggers py-script to manage DNS state / GC
+[ consul-service-manager ] (Runs on edge sites/hosts)
+        │
+        ├── 1. Filters monitoring targets by 'SITE' env
+        ├── 2. Computes 'config_hash' to identify drift
+        └── 3. Registers endpoint checks via HTTP API
+        ▼
+[ Local Consul Agent ] (Executes ICMP, HTTP, TCP, SMTP checks)
+        │
+        │ (Syncs service status & metadata)
+        ▼
+[ Consul Service Registry ]
+        │
+        │ (Consul Template watch index & serfHealth status)
+        ▼
+[ consul-dns-manager ] (Runs centrally inside Kubernetes)
+        │
+        ├── 1. Evaluates metadata (ttl, quorum, on_all_fail)
+        ├── 2. Renders unified target state to JSON
+        └── 3. Triggers provider-specific script
+        ▼
+[ DNS-Providers (Selectel Cloud API / MS Active Directory) ]
 ```
 
 ## Components
@@ -69,3 +74,7 @@ Setup the Consul Agent and service manager daemon by docker compose on your targ
 3. Deploy DNS Controller (Kubernetes):
 Configure your DNS provider credentials (e.g., Selectel API tokens, Windows AD SSH creds) within the Kubernetes secrets, adjust the ConfigMap, and apply the deployment manifests to your K8s cluster.
 (See [component doc](consul-dns-manager/README.md) for manifests details and routing logic).
+
+## Alerts
+
+The `consul-dns-manager/alerts/loki-alertmanager-alerts.yml` file contains alerting rules for Grafana Alertmanager.

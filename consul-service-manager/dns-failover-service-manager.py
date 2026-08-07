@@ -264,22 +264,37 @@ class DesiredService:
             port = chk.get("port")
             check = {**base_check, "TCP": f"{target}:{port}"}
 
+        # each response code except 0 will be 2
         elif kind == "icmp":
-            check = {**base_check, "Args": ["ping", "-c", "1", "-W", "1", target]}
+            check = {
+                **base_check,
+                "Args": [
+                    "/bin/sh", "-c",
+                    'ping -c 1 -W 1 "$1" || exit 2',
+                    "--", target,
+                ],
+            }
 
         elif kind == "smtp":
             port = chk.get("port", 25)
-            timeout_sec = 5  # timeout in seconds for netcat
+            timeout_sec = 5  # таймаут в сек для netcat
             if timeout:
                 match = re.match(r"(\d+)", str(timeout))
                 if match:
                     timeout_sec = int(match.group(1))
             shell_cmd = (
-                f"out=$( (sleep 1; echo 'QUIT') | nc -w {timeout_sec} {target} {port} 2>&1 ); "
-                f"echo \"$out\"; "
-                f"echo \"$out\" | grep -q '^220'"
+                'out=$( (sleep 1; echo "QUIT") | nc -w "$1" "$2" "$3" 2>&1 ); '
+                'echo "$out"; '
+                'echo "$out" | grep -q "^220" || exit 2'
             )
-            check = {**base_check, "Args": ["/bin/sh", "-c", shell_cmd]}
+
+            check = {
+                **base_check,
+                "Args": [
+                    "/bin/sh", "-c", shell_cmd,
+                    "--", str(timeout_sec), str(target), str(port),
+                ],
+            }
 
         elif kind == "http":
             if "url" in chk:
@@ -292,13 +307,13 @@ class DesiredService:
                     path = "/" + path
                 url = f"{scheme}://{target}:{port}{path}"
             check = {**base_check, "HTTP": url, "Method": chk.get("method", "GET"),}
-            # Optional header, tls_skip_verify
+            # опционально header, tls_skip_verify
             if "header" in chk:
                 check["Header"] = chk["header"]
             if chk.get("tls_skip_verify"):
                 check["TLSSkipVerify"] = True
         else:
-            raise ValueError(f"Unknown value for check.kind={kind!r}")
+            raise ValueError(f"Неизвестное значение check.kind={kind!r}")
         
         # Dots break dns names in Consul
         zone_slug = _slug(zone_name)

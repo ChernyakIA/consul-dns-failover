@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dns-manager-windns-known-hosts
+  namespace: consul
+data:
+  # Replace this line with output from a trusted out-of-band ssh-keyscan.
+  known_hosts: "dns01.internal.example.com ssh-ed25519 REPLACE_WITH_REAL_PUBLIC_KEY"

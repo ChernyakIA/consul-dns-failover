@@ -1,3 +1,27 @@
-.vscode
-.venv
-__pycache__
+.venv/
+.vscode/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local desired state and credentials
+config/monitoring.yml
+.env
+*.pem
+*.key
+*.crt
+sensitive-*.yml
+sensitive-*.yaml
+sensitive-*.json
+!deploy/docker/monitoring/sensitive-agent.example.json
+deploy/**/secrets.yml
+deploy/**/secret.yml
+
+# Local Docker deployment files
+deploy/docker/monitoring/agents-configs/*-agent.json
+!deploy/docker/monitoring/agents-configs/agent.example.json
+deploy/docker/monitoring/service-manager-configs/*.env
+!deploy/docker/monitoring/service-manager-configs/service-manager.example.env

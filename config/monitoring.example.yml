@@ -1,0 +1,59 @@
+# Copy to config/monitoring.yml, customize it, then upload it to
+# Consul KV at dns-failover/dns-failover-monitoring-config.yml.
+
+defaults:
+  check:
+    interval: "15s"
+    timeout: "5s"
+    success_before_passing: 2
+    failures_before_warning: 2
+    failures_before_critical: 3
+  quorum: 2
+  minimum_observers: 2
+  ttl: 60
+
+zones:
+  - zone_name: "example.com"
+    dns_provider: "selecteldns"
+    sel_zone_id: "00000000-0000-0000-0000-000000000000"
+    records:
+      - name: "app"
+        on_all_fail: "fallback"  # keep | remove | fallback
+        fallback_ip: "192.0.2.100"
+        endpoints:
+          - ip: "192.0.2.10"
+            uplink_provider: "provider-a"
+            owner_site: "site-a"
+            sites: ["site-b", "site-c"]
+            check:
+              kind: "icmp"
+              target: "192.0.2.10"
+          - ip: "192.0.2.20"
+            uplink_provider: "provider-b"
+            owner_site: "site-b"
+            sites: ["site-a", "site-c"]
+            check:
+              kind: "http"
+              target: "192.0.2.20"
+              port: 8080
+              path: "/healthz"
+              method: "GET"
+
+  - zone_name: "internal.example.com"
+    dns_provider: "windns"
+    win_dns_server: "dns01.internal.example.com"
+    records:
+      - name: "mail"
+        ttl: 120
+        on_all_fail: "keep"
+        endpoints:
+          - ip: "198.51.100.25"
+            uplink_provider: "provider-a"
+            owner_site: "site-a"
+            sites: ["site-b", "site-c"]
+            quorum: 2
+            minimum_observers: 2
+            check:
+              kind: "smtp"
+              target: "198.51.100.25"
+              port: 25

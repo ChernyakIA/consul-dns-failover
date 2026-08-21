@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dns-manager-config
+  namespace: consul
+  labels:
+    app.kubernetes.io/part-of: dns-failover
+    app.kubernetes.io/component: dns-manager
+data:
+  CONSUL_HTTP_ADDR: "https://consul-server.consul.svc:8501"
+  CONSUL_CONFIG_PATH: "dns-failover/dns-failover-monitoring-config.yml"
+  CONSUL_GC_PATH: "dns-failover/gc/"
+  SERVICE_NAME_REGEX: "^dns-failover-"
+  HTTP_CONNECT_TIMEOUT: "5"
+  HTTP_READ_TIMEOUT: "15"
+  HTTP_RETRY_TOTAL: "2"
+
+  selectel.hcl: |
+    log_level = "info"
+    consul {
+      address = "consul-server.consul.svc:8501"
+      ssl {
+        enabled     = true
+        verify      = true
+        ca_cert     = "/consul/tls/ca/tls.crt"
+        server_name = "server.dc1.consul"
+      }
+    }
+    template {
+      source      = "/opt/dns-failover/service-meta-output.tpl"
+      destination = "/work/service-state.json"
+      exec {
+        command = ["python3", "/opt/dns-failover/dns-failover-manager-selectel.py", "/work/service-state.json"]
+        timeout = "120s"
+      }
+      wait {
+        min = "5s"
+        max = "10s"
+      }
+    }
+
+  windns.hcl: |
+    log_level = "info"
+    consul {
+      address = "consul-server.consul.svc:8501"
+      ssl {
+        enabled     = true
+        verify      = true
+        ca_cert     = "/consul/tls/ca/tls.crt"
+        server_name = "server.dc1.consul"
+      }
+    }
+    template {
+      source      = "/opt/dns-failover/service-meta-output.tpl"
+      destination = "/work/service-state.json"
+      exec {
+        command = ["python3", "/opt/dns-failover/dns-failover-manager-windns.py", "/work/service-state.json"]
+        timeout = "90s"
+      }
+      wait {
+        min = "5s"
+        max = "10s"
+      }
+    }

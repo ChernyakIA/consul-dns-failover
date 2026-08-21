@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dns-manager-loki-alerting-rules
+  namespace: monitoring
+  labels:
+    loki_rule: "1"
+  annotations:
+    k8s-sidecar-target-directory: "self-monitoring"
+data:
+  dns-manager.txt: |
+    groups:
+      - name: dns-manager-alerts
+        rules:
+
+          # 1. Ownership registry update
+          - alert: DnsManagerConsulRegistryUpdated
+            expr: sum by (cluster, pod, namespace, container) (count_over_time({namespace="consul", pod=~"dns-manager-.*"} |= "The ownership registry (GC registry) was updated in Consul KV"[1m])) > 0
+            labels:
+              severity: warning
+              loki: noresolve
+              category: specific
+            annotations:
+              summary: "The ownership registry changed in Consul KV."
+
+          # 2. A-record changes
+          - alert: DnsManagerARecordChanged
+            expr: |
+              sum by (cluster, pod, namespace, container, domain, action) (
+                count_over_time(
+                  {namespace="consul", pod=~"dns-manager-.*"}
+                  |~ "(creating|patching|updating|deleting)"
+                  | regexp `\] (?P<domain>\S+) A: (?P<action>creating|patching|updating|deleting)`
+                  [1m]
+                )
+              ) > 0
+            labels:
+              severity: warning
+              loki: noresolve
+              category: specific
+            annotations:
+              summary: "Domain A-record change"
+              description: "Domain: {{ $labels.domain }}\nAction: {{ $labels.action }}\nInspect the pod logs."
+
+          # 3. Synchronization failure
+          - alert: DnsManagerSyncTransactionFailed
+            expr: |
+              sum by (cluster, pod, namespace, container) (
+                count_over_time(
+                  {namespace="consul", pod=~"dns-manager-.*"}
+                  |= "Synchronization completed with errors"
+                  [1m]
+                )
+              ) > 0
+            labels:
+              severity: critical
+              loki: noresolve
+              category: specific
+            annotations:
+              summary: "DNS update failed"
+              description: "The DNS manager stopped safely after errors. Inspect preceding ERROR lines for the root cause."
+
+          # 4. Provider authentication or connectivity errors
+          - alert: DnsManagerProviderConnectivityError
+            expr: |
+              sum by (cluster, pod, namespace, container) (
+                count_over_time(
+                  {namespace="consul", pod=~"dns-manager-.*"}
+                  |~ "(?i)(Selectel DNS API:|Selectel authentication failed|SSH timeout|refused|Connection refused)"
+                  [1m]
+                )
+              ) > 0
+            labels:
+              severity: critical
+              loki: noresolve
+              category: specific
+            annotations:
+              summary: "Provider access error (API or SSH)"
+              description: "Inspect the ERROR line in the pod logs."
+
+          # 5. Consul KV state-store error
+          - alert: DnsManagerSynchronizationError
+            expr: |
+              sum by (cluster, pod, namespace, container) (
+                count_over_time(
+                  {namespace="consul", pod=~"dns-manager-.*"}
+                  |= "DNS synchronization failed:"
+                  [1m]
+                )
+              ) > 0
+            labels:
+              severity: high
+              loki: noresolve
+              category: specific
+            annotations:
+              summary: "DNS synchronization failed"
+              description: "Inspect the preceding ERROR message in the pod logs for the root cause."
+
+          # 6. Generic controller errors (fallback rule)
+          - alert: DnsManagerAppErrors
+            expr: |
+              sum by (cluster, pod, namespace, container) (
+                count_over_time(
+                  {namespace="consul", pod=~"dns-manager-.*"}
+                  |~ "(?i)^.*?ERROR\\s+\\["
+                  [1m]
+                )
+              ) > 0
+            labels:
+              severity: warning
+              loki: noresolve
+              category: generic
+            annotations:
+              summary: "Unhandled controller error"
+              description: "Inspect the pod logs."

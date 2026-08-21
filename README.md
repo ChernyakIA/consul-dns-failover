@@ -1,80 +1,111 @@
-# Consul DNS Failover System
+# Consul DNS Failover
 
-A full-stack, distributed automated DNS failover and monitoring solution powered by HashiCorp Consul. This system continuously tracks critical services, performs distributed health checking, and dynamically reconciles target A records across your DNS-provider systems based on active monitoring data.
+[![CI](https://github.com/ChernyakIA/consul-dns-failover/actions/workflows/ci.yml/badge.svg)](https://github.com/ChernyakIA/consul-dns-failover/actions/workflows/ci.yml)
+[![Release images](https://github.com/ChernyakIA/consul-dns-failover/actions/workflows/release.yml/badge.svg)](https://github.com/ChernyakIA/consul-dns-failover/actions/workflows/release.yml)
+[![License](https://img.shields.io/github/license/ChernyakIA/consul-dns-failover)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/ChernyakIA/consul-dns-failover)](https://github.com/ChernyakIA/consul-dns-failover/releases)
 
-The project consists of two components:
+Distributed health checking and automated DNS A-record reconciliation built on HashiCorp Consul.
 
-1. **Consul Service Manager** – A declarative Python daemon that dynamically translates YAML configurations stored in Consul KV into local agent health checks.
-2. **Consul DNS Manager** – An automated failover controller running inside Kubernetes that watches the service registry and updates external DNS providers.
+The system observes each endpoint from multiple independent sites, distinguishes a confirmed outage from missing monitoring data, and changes DNS only after the configured quorum has been reached. Currently it supports Selectel DNS and Microsoft DNS over SSH/PowerShell.
 
-Current DNS-provider support:
+> [!WARNING]
+> This software can create, replace, and delete DNS records. Test with delegated zones, keep `on_all_fail: keep` during rollout, and use least-privilege credentials. Multiple replicas of the same DNS controller configuration are supported only when they share the same Consul cluster, provider lock, ownership registry, and desired state. Never mix lock-aware controllers with older versions or run conflicting configurations for the same provider and zone set.
 
-- Selectel DNS Cloud API
-- Microsoft Active Directory DNS
-
-## Content
-
-- [End-to-End Architecture](#end-to-end-architecture)
-- [Componentsn](#components)
-- [Global Deployment Workflow](#global-deployment-workflow)
-
-## End-to-End Architecture
+## How it works
 
 ```text
-[ Consul Server KV / YAML Configuration ]
-        │
-        │ (Long-Polling / Blocking Query)
-        ▼
-[ consul-service-manager ] (Runs on edge sites/hosts)
-        │
-        ├── 1. Filters monitoring targets by 'SITE' env
-        ├── 2. Computes 'config_hash' to identify drift
-        └── 3. Registers endpoint checks via HTTP API
-        ▼
-[ Local Consul Agent ] (Executes ICMP, HTTP, TCP, SMTP checks)
-        │
-        │ (Syncs service status & metadata)
-        ▼
-[ Consul Service Registry ]
-        │
-        │ (Consul Template watch index & serfHealth status)
-        ▼
-[ consul-dns-manager ] (Runs centrally inside Kubernetes)
-        │
-        ├── 1. Evaluates metadata (ttl, quorum, on_all_fail)
-        ├── 2. Renders unified target state to JSON
-        └── 3. Triggers provider-specific script
-        ▼
-[ DNS-Providers (Selectel Cloud API / MS Active Directory) ]
+Consul KV (desired configuration file.yml)
+        |
+        v
+monitoring-controller on every site
+  active ICMP/TCP/HTTP/SMTP checks
+        |
+        v
+Consul Catalog + TTL checks + site metadata
+        |
+        v
+consul-template -> aggregated JSON snapshot
+        |
+        +--> Selectel DNS reconciler
+        `--> Microsoft DNS reconciler over SSH
 ```
 
-## Components
+| Image | Purpose |
+| --- | --- |
+| `ghcr.io/chernyakia/consul-dns-failover-monitoring-controller` | Reads desired state from Consul KV, runs active checks and publishes TTL state to the local Consul agent. |
+| `ghcr.io/chernyakia/consul-dns-failover-dns-controller` | Renders Catalog state and reconciles Selectel or Microsoft DNS. |
 
-1. Consul Service Manager
-Designed to run alongside your edge nodes. It dynamically translates YAML configuration into local Consul host health checks, talking directly to the local Consul Agent's HTTP API (/v1/agent/service) to keep checks in sync and detect configuration drift.
+## Safety model
 
-    [Consul Service Manager Documentation](consul-service-manager/README.md)
+1. Results are deduplicated by `site`; multiple agents in one site produce at most one vote.
+2. Fewer than `minimum_observers` valid site results means **unknown** and DNS is left unchanged.
+3. Candidates with at least `quorum` confirmations are published.
+4. If no candidate reaches quorum, `on_all_fail` selects `keep`, `remove`, or `fallback`.
 
-2. Consul DNS Manager
-A Kubernetes-native failover manager. It evaluates service metrics extracting Consul Service Metadata (like on_all_fail, quorum, agents_alive), automatically filters active service IPs, and triggers provider scripts based on operational state shifts via a Reconciliation Loop.
+| Check result | Consul TTL state | DNS meaning |
+| --- | --- | --- |
+| `PASS` | `passing` after the success threshold | observation and confirmation |
+| `FAIL` | `warning`, then `critical` after failure thresholds | observation without confirmation |
+| `ERROR` | `warning` | no valid observation; a broken checker is not an outage |
 
-    [Consul DNS Manager Documentation](consul-dns-manager/README.md)
+The DNS controller keeps a provider-specific managed-record registry in Consul KV. Garbage collection is disabled whenever the previous registry or current desired configuration cannot be read, preventing a transient Consul/TLS/ACL error from becoming a mass deletion.
 
-## Global Deployment Workflow
+## Repository layout
 
-To bring up the entire system, follow this.
+```text
+components/
+  monitoring-controller/  active checks and Consul reconciliation
+  dns-controller/         provider reconcilers and consul-template template
+config/                    documented desired-state example
+deploy/                    Docker, Kustomize and Argo CD examples
+docs/                      architecture, configuration, operations, versioning
+tests/                     minimal decision and configuration tests
+```
 
-1. Initialize Global State:
-Push your monitoring configuration (e.g., example-dns-failover-monitoring-config.yml) to Consul Server KV under the assigned path.
+## Quick start
 
-2. Deploy Edge Daemons (Service Managers):
-Setup the Consul Agent and service manager daemon by docker compose on your target edge nodes.
-(See [component doc](consul-service-manager/README.md) for manifests details and routing logic).
+1. Copy `config/monitoring.example.yml` to `config/monitoring.yml`, customize it, and upload it:
 
-3. Deploy DNS Controller (Kubernetes):
-Configure your DNS provider credentials (e.g., Selectel API tokens, Windows AD SSH creds) within the Kubernetes secrets, adjust the ConfigMap, and apply the deployment manifests to your K8s cluster.
-(See [component doc](consul-dns-manager/README.md) for manifests details and routing logic).
+   ```sh
+   consul kv put dns-failover/dns-failover-monitoring-config.yml @config/monitoring.yml
+   ```
 
-## Alerts
+2. Deploy one monitoring controller per independent site. For Docker, copy the example files under `deploy/docker/monitoring`, add the Consul CA and ACL tokens, then run:
 
-The `consul-dns-manager/alerts/loki-alertmanager-alerts.yml` file contains alerting rules for Grafana Alertmanager.
+   ```sh
+   AGENT_NAME=consul-monitor-1 CONSUL_HTTP_TOKEN='<token>' docker compose -f deploy/docker/monitoring/compose.yml up -d
+   ```
+
+3. Create Kubernetes secrets from `deploy/k8s/overlays/example/secrets.example.yml` outside Git, customize Consul TLS/address settings and replace the placeholder in `windns-known-hosts.example.yml` with the verified SSH server host key. Both plain and OpenSSH hashed `known_hosts` entries (`|1|<salt>|<HMAC> ...`) are supported; hashed entries are matched automatically against `WIN_SSH_HOST`. Then apply:
+
+   ```sh
+   kubectl apply -k deploy/k8s/overlays/example
+   ```
+
+Real secrets, CA files, live desired state, internal hostnames, and environment-specific overlays are intentionally excluded from Git.
+
+## Documentation
+
+- [Architecture and failure semantics](docs/architecture.md)
+- [Desired state and environment variables](docs/configuration.md)
+- [Deployment and operations](docs/operations.md)
+- [Versioning and image tags](docs/versioning.md)
+- [Security policy](SECURITY.md)
+
+## Local checks
+
+```sh
+python -m pip install -r components/monitoring-controller/requirements.txt pytest
+python -m compileall -q components
+pytest
+docker build components/monitoring-controller
+docker build components/dns-controller
+kubectl kustomize deploy/k8s/overlays/example >/dev/null
+```
+
+`CI` runs minimal checks and both image builds for pull requests and `main`. Release tags publish multi-architecture images.
+
+## License
+
+[Apache License 2.0](LICENSE).

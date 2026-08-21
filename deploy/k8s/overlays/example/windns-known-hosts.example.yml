@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dns-manager-windns-known-hosts
+  namespace: consul
+data:
+  # Replace this line with a host key verified through a trusted out-of-band channel.
+  # Plain and OpenSSH hashed host fields are both supported. For example:
+  # |1|BASE64_SALT|BASE64_HMAC ecdsa-sha2-nistp256 BASE64_PUBLIC_KEY
+  known_hosts: "dns01.internal.example.com ssh-ed25519 REPLACE_WITH_REAL_PUBLIC_KEY"

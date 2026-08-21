@@ -1,0 +1,40 @@
+name: consul-dns-failover-monitoring
+
+x-restart-policy: &restart-policy unless-stopped
+
+services:
+  consul-agent:
+    image: hashicorp/consul:2.0.2
+    restart: *restart-policy
+    hostname: ${AGENT_NAME:-consul-monitor-1}
+    ports:
+      - "8301:8301/tcp"
+      - "8301:8301/udp"
+    volumes:
+      - ./agents-configs/${AGENT_NAME:-consul-monitor-1}-agent.json:/consul/config/agent.json:ro
+      - ./agents-configs/sensitive-${AGENT_NAME:-consul-monitor-1}-agent.json:/consul/config/sensitive.json:ro
+      - ./tls/consul-agent-ca.pem:/consul/tls/ca/consul-agent-ca.pem:ro
+      - consul_data:/consul/data
+    command: ["agent", "-config-dir=/consul/config"]
+    healthcheck:
+      test: ["CMD-SHELL", "CONSUL_HTTP_ADDR=http://127.0.0.1:8500 consul members | grep -Eq 'alive[[:space:]]+server'"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  monitoring-controller:
+    image: ghcr.io/chernyakia/consul-dns-failover-monitoring-controller:${IMAGE_TAG:-latest}
+    restart: *restart-policy
+    network_mode: "service:consul-agent"
+    depends_on:
+      consul-agent:
+        condition: service_healthy
+    env_file:
+      - ./service-manager-configs/service-manager.env
+    environment:
+      CONSUL_HTTP_TOKEN: ${CONSUL_HTTP_TOKEN:?set CONSUL_HTTP_TOKEN}
+    volumes:
+      - ./tls/consul-agent-ca.pem:/consul/tls/ca/consul-agent-ca.pem:ro
+
+volumes:
+  consul_data:

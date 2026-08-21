@@ -1,0 +1,12 @@
+{
+  "datacenter": "dc1",
+  "node_name": "consul-monitor-1",
+  "server": false,
+  "data_dir": "/consul/data",
+  "client_addr": "0.0.0.0",
+  "bind_addr": "0.0.0.0",
+  "retry_join": ["consul-server.example.com"],
+  "verify_outgoing": true,
+  "ca_file": "/consul/tls/ca/consul-agent-ca.pem",
+  "auto_encrypt": {"tls": true}
+}

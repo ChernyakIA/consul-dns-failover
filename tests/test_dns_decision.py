@@ -23,7 +23,8 @@ def test_unknown_state_keeps_dns_unchanged(controller):
         "minimum_observers": 2,
         "on_all_fail": "remove",
     }
-    assert controller.decide(item) == ("keep", [])
+    decision = controller.decide(item)
+    assert (decision.action, decision.ips) == ("keep", [])
 
 
 def test_quorum_sets_only_confirmed_candidates(controller):
@@ -34,7 +35,8 @@ def test_quorum_sets_only_confirmed_candidates(controller):
         "quorum": 2,
         "minimum_observers": 2,
     }
-    assert controller.decide(item) == ("set", ["192.0.2.10"])
+    decision = controller.decide(item)
+    assert (decision.action, decision.ips) == ("set", ["192.0.2.10"])
 
 
 def test_all_failed_uses_fallback(controller):
@@ -47,7 +49,8 @@ def test_all_failed_uses_fallback(controller):
         "on_all_fail": "fallback",
         "fallback_ip": "192.0.2.100",
     }
-    assert controller.decide(item) == ("set", ["192.0.2.100"])
+    decision = controller.decide(item)
+    assert (decision.action, decision.ips) == ("set", ["192.0.2.100"])
 
 
 def test_all_failed_can_remove_record(controller):
@@ -59,4 +62,5 @@ def test_all_failed_can_remove_record(controller):
         "minimum_observers": 2,
         "on_all_fail": "remove",
     }
-    assert controller.decide(item) == ("remove", [])
+    decision = controller.decide(item)
+    assert (decision.action, decision.ips) == ("remove", [])

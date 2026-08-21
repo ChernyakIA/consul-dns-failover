@@ -78,7 +78,7 @@ tests/                     minimal decision and configuration tests
      docker compose -f deploy/docker/monitoring/compose.yml up -d
    ```
 
-3. Create Kubernetes secrets from `deploy/k8s/overlays/example/secrets.example.yml` outside Git, customize Consul TLS/address settings, pin an image version, and apply:
+3. Create Kubernetes secrets from `deploy/k8s/overlays/example/secrets.example.yml` outside Git, customize Consul TLS/address settings, pin an image version, and replace the placeholder in `windns-known-hosts.example.yml` with the verified SSH server host key. Both plain and OpenSSH hashed `known_hosts` entries (`|1|<salt>|<HMAC> ...`) are supported; hashed entries are matched automatically against `WIN_SSH_HOST`. Then apply:
 
    ```sh
    kubectl apply -k deploy/k8s/overlays/example

@@ -86,7 +86,8 @@ def test_incomplete_desired_state_disables_gc(state_store):
 def test_registry_write_failure_is_reported(state_store):
     module, store, _ = state_store
     store.session = Session(put_error=module.requests.ConnectionError("down"))
-    assert store.save_active_records([]) is False
+    with pytest.raises(module.requests.ConnectionError, match="down"):
+        store.save_active_records([])
 
 
 def test_check_timing_changes_config_hash():

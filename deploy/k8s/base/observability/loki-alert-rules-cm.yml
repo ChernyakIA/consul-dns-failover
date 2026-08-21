@@ -13,24 +13,24 @@ data:
       - name: dns-manager-alerts
         rules:
 
-          # 1. Изменение ресстра активных доменов
+          # 1. Ownership registry update
           - alert: DnsManagerConsulRegistryUpdated
-            expr: sum by (cluster, pod, namespace, container) (count_over_time({namespace="consul", pod=~"dns-manager-.*"} |= "Реестр активных доменов обновлён в Consul KV"[1m])) > 0
+            expr: sum by (cluster, pod, namespace, container) (count_over_time({namespace="consul", pod=~"dns-manager-.*"} |= "The ownership registry (GC registry) was updated in Consul KV"[1m])) > 0
             labels:
               severity: warning
               loki: noresolve
               category: specific
             annotations:
-              summary: "В Consul KV изменился список управляемых доменов."
+              summary: "The ownership registry changed in Consul KV."
 
-          # 2. Изменение A-записей
+          # 2. A-record changes
           - alert: DnsManagerARecordChanged
             expr: |
               sum by (cluster, pod, namespace, container, domain, action) (
                 count_over_time(
                   {namespace="consul", pod=~"dns-manager-.*"}
-                  |~ "(создаю|патчу|меняю|удаляю)"
-                  | regexp `\] (?P<domain>\S+) A: (?P<action>создаю|патчу|меняю|удаляю)`
+                  |~ "(creating|patching|updating|deleting)"
+                  | regexp `\] (?P<domain>\S+) A: (?P<action>creating|patching|updating|deleting)`
                   [1m]
                 )
               ) > 0
@@ -39,16 +39,16 @@ data:
               loki: noresolve
               category: specific
             annotations:
-              summary: "Изменение A-записей домена"
-              description: "Домен: {{ $labels.domain }}\nДействие: {{ $labels.action }}\nПроверь логи pod."
+              summary: "Domain A-record change"
+              description: "Domain: {{ $labels.domain }}\nAction: {{ $labels.action }}\nInspect the pod logs."
 
-          # 3. Провал транзакции синхронизации
+          # 3. Synchronization failure
           - alert: DnsManagerSyncTransactionFailed
             expr: |
               sum by (cluster, pod, namespace, container) (
                 count_over_time(
                   {namespace="consul", pod=~"dns-manager-.*"}
-                  |= "Синхронизация завершилась с ошибками"
+                  |= "Synchronization completed with errors"
                   [1m]
                 )
               ) > 0
@@ -57,16 +57,16 @@ data:
               loki: noresolve
               category: specific
             annotations:
-              summary: "Провал обновления DNS"
-              description: "DNS-manager защитно остановил транзакцию и НЕ обновил стейт в Consul KV. Первопричину ищи в предыдущих строках ERROR этого запуска."
+              summary: "DNS update failed"
+              description: "The DNS manager stopped safely after errors. Inspect preceding ERROR lines for the root cause."
 
-          # 4. Проблемы с Auth / Сетью (Selectel IAM token & SSH PowerShell)
+          # 4. Provider authentication or connectivity errors
           - alert: DnsManagerProviderConnectivityError
             expr: |
               sum by (cluster, pod, namespace, container) (
                 count_over_time(
                   {namespace="consul", pod=~"dns-manager-.*"}
-                  |~ "(?i)(Selectel DNS API:|Ошибка при авторизации в Selectel|SSH timeout|Отказ|Connection refused)"
+                  |~ "(?i)(Selectel DNS API:|Selectel authentication failed|SSH timeout|refused|Connection refused)"
                   [1m]
                 )
               ) > 0
@@ -75,16 +75,16 @@ data:
               loki: noresolve
               category: specific
             annotations:
-              summary: "Ошибка доступа к провайдеру (API или SSH)"
-              description: "Смотри строку ERROR в логах pod."
+              summary: "Provider access error (API or SSH)"
+              description: "Inspect the ERROR line in the pod logs."
 
-          # 5. Ошибка работы со State-хранилищем (Consul KV)
-          - alert: DnsManagerConsulSateError
+          # 5. Consul KV state-store error
+          - alert: DnsManagerSynchronizationError
             expr: |
               sum by (cluster, pod, namespace, container) (
                 count_over_time(
                   {namespace="consul", pod=~"dns-manager-.*"}
-                  |= "Ошибка сохранения состояния в Consul KV"
+                  |= "DNS synchronization failed:"
                   [1m]
                 )
               ) > 0
@@ -93,10 +93,10 @@ data:
               loki: noresolve
               category: specific
             annotations:
-              summary: "Ошибка записи State-файла в Consul KV"
-              description: "Скрипт отработал успешно, но не смог сохранить результат в Consul KV. Это может привести к ошибочным удалениям (GC) при следующих запусках."
+              summary: "DNS synchronization failed"
+              description: "Inspect the preceding ERROR message in the pod logs for the root cause."
 
-          # 6. Общие ошибки скриптов (Fallback-правило)
+          # 6. Generic controller errors (fallback rule)
           - alert: DnsManagerAppErrors
             expr: |
               sum by (cluster, pod, namespace, container) (
@@ -111,5 +111,5 @@ data:
               loki: noresolve
               category: generic
             annotations:
-              summary: "Необработанная ошибка в сервисе"
-              description: "Смотри логи pod."
+              summary: "Unhandled controller error"
+              description: "Inspect the pod logs."

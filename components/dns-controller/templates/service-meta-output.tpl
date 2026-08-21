@@ -26,7 +26,7 @@
     {{- $all := service (print $svc "|any") -}}
     {{- if gt (len $all) 0 -}}
 
-        {{- /* Один site даёт не более одного голоса, если в site несколько одноимённых агентов. */ -}}
+        {{- /* One site contributes at most one vote when it contains multiple agents with the same name. */ -}}
         {{- range $instance := $all -}}
             {{- $ip := $instance.Address -}}
             {{- $site := index $instance.ServiceMeta "site" -}}
@@ -48,7 +48,7 @@
                 {{- end -}}
             {{- end -}}
 
-            {{- /* warning = ошибка проверки и не является ответом статуса цели. */ -}}
+            {{- /* warning indicates a check error and is not a target status response. */ -}}
             {{- if and $nodeLive $checkObserved -}}
                 {{- scratch.MapSet (printf "observed|%s|%s" $svc $ip) $site true -}}
                 {{- if $checkPassing -}}
@@ -84,7 +84,7 @@
                     {{- end -}}
                 ],
 
-                {{- /* Сколько живых site дали результат */ -}}
+                {{- /* Number of live sites that produced a result */ -}}
                 "observations": {
                     {{- $first := true -}}
                     {{- range $ip := scratch.MapValues (printf "candidate|%s" $svc) -}}
@@ -94,7 +94,7 @@
                     {{- end -}}
                 },
 
-                {{- /* сколько разных site подтвердили доступность */ -}}
+                {{- /* Number of distinct sites that confirmed availability */ -}}
                 "confirmations": {
                     {{- $first := true -}}
                     {{- range $ip := scratch.MapValues (printf "candidate|%s" $svc) -}}

@@ -7,15 +7,15 @@
 
 Distributed health checking and automated DNS A-record reconciliation built on HashiCorp Consul.
 
-The system observes each endpoint from multiple independent sites, distinguishes a confirmed outage from missing monitoring data, and changes DNS only after the configured quorum has been reached. It supports Selectel DNS and Microsoft DNS over SSH/PowerShell.
+The system observes each endpoint from multiple independent sites, distinguishes a confirmed outage from missing monitoring data, and changes DNS only after the configured quorum has been reached. Currently it supports Selectel DNS and Microsoft DNS over SSH/PowerShell.
 
 > [!WARNING]
-> This software can create, replace, and delete DNS records. Test with delegated zones, keep `on_all_fail: keep` during rollout, use least-privilege credentials, and never run two controllers for the same provider and zone set.
+> This software can create, replace, and delete DNS records. Test with delegated zones, keep `on_all_fail: keep` during rollout, and use least-privilege credentials. Multiple replicas of the same DNS controller configuration are supported only when they share the same Consul cluster, provider lock, ownership registry, and desired state. Never mix lock-aware controllers with older versions or run conflicting configurations for the same provider and zone set.
 
 ## How it works
 
 ```text
-Consul KV (desired YAML)
+Consul KV (desired configuration file.yml)
         |
         v
 monitoring-controller on every site
@@ -74,11 +74,10 @@ tests/                     minimal decision and configuration tests
 2. Deploy one monitoring controller per independent site. For Docker, copy the example files under `deploy/docker/monitoring`, add the Consul CA and ACL tokens, then run:
 
    ```sh
-   AGENT_NAME=consul-monitor-1 CONSUL_HTTP_TOKEN='<token>' \
-     docker compose -f deploy/docker/monitoring/compose.yml up -d
+   AGENT_NAME=consul-monitor-1 CONSUL_HTTP_TOKEN='<token>' docker compose -f deploy/docker/monitoring/compose.yml up -d
    ```
 
-3. Create Kubernetes secrets from `deploy/k8s/overlays/example/secrets.example.yml` outside Git, customize Consul TLS/address settings, pin an image version, and replace the placeholder in `windns-known-hosts.example.yml` with the verified SSH server host key. Both plain and OpenSSH hashed `known_hosts` entries (`|1|<salt>|<HMAC> ...`) are supported; hashed entries are matched automatically against `WIN_SSH_HOST`. Then apply:
+3. Create Kubernetes secrets from `deploy/k8s/overlays/example/secrets.example.yml` outside Git, customize Consul TLS/address settings and replace the placeholder in `windns-known-hosts.example.yml` with the verified SSH server host key. Both plain and OpenSSH hashed `known_hosts` entries (`|1|<salt>|<HMAC> ...`) are supported; hashed entries are matched automatically against `WIN_SSH_HOST`. Then apply:
 
    ```sh
    kubectl apply -k deploy/k8s/overlays/example
@@ -106,10 +105,6 @@ kubectl kustomize deploy/k8s/overlays/example >/dev/null
 ```
 
 `CI` runs minimal checks and both image builds for pull requests and `main`. Release tags publish multi-architecture images.
-
-## Versioning
-
-The repository and both images share one SemVer version. Tag `v1.4.2` publishes `1.4.2`, `1.4`, `1`, and `latest`. Pin `1.4.2` or a digest in production; `latest` is for evaluation. See [versioning](docs/versioning.md).
 
 ## License
 

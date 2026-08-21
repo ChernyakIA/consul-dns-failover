@@ -32,7 +32,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: selectel
-          image: ghcr.io/chernyakia/consul-dns-failover-dns-controller:latest
+          image: ghcr.io/chernyakia/consul-dns-failover-dns-controller:v0.3.1
           imagePullPolicy: Always
           # emptyDir переживает restart отдельного container.
           # Если предыдущая exec-команда завершилась с ошибкой, старый destination останется
@@ -101,7 +101,7 @@ spec:
             - {name: tmp-selectel, mountPath: /tmp}
 
         - name: windns
-          image: ghcr.io/chernyakia/consul-dns-failover-dns-controller:latest
+          image: ghcr.io/chernyakia/consul-dns-failover-dns-controller:v0.3.1
           imagePullPolicy: Always
           command: ["/bin/sh", "-ec"]
           args:

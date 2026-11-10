@@ -4,6 +4,7 @@ import base64
 from dataclasses import replace
 
 import pytest
+import requests
 
 from conftest import ROOT, load_module
 
@@ -85,8 +86,8 @@ def test_incomplete_desired_state_disables_gc(state_store):
 
 def test_registry_write_failure_is_reported(state_store):
     module, store, _ = state_store
-    store.session = Session(put_error=module.requests.ConnectionError("down"))
-    with pytest.raises(module.requests.ConnectionError, match="down"):
+    store.session = Session(put_error=requests.ConnectionError("down"))
+    with pytest.raises(requests.ConnectionError, match="down"):
         store.save_active_records([])
 
 

@@ -32,24 +32,21 @@ import os
 import sys
 import json
 import base64
-import requests
-import yaml
 import logging
 import subprocess
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-from collections import defaultdict
+from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 from dns_controller_common import (
-    ConsulProviderLock,
+    Decision,
     OwnershipBlocked,
+    ProviderBackend,
+    ProviderStateStore,
     build_identity,
-    identity_key,
-    load_registry_payload,
-    registry_payload,
-    transition_ownership,
     canonical_dns_name,
-    finish_ownership_sync,
+    consul_addr_from_env,
+    relative_record_name,
+    run_sync,
 )
 
 # --------------------------------------------------------------------------- #
@@ -115,17 +112,11 @@ class Config:
             )
             sys.exit(1)
 
-        consul_addr = os.environ["CONSUL_HTTP_ADDR"].rstrip("/")
-        if not consul_addr.startswith(("http://", "https://")):
-            consul_http_ssl = os.environ.get("CONSUL_HTTP_SSL", "true").strip().lower()
-            scheme = "https" if consul_http_ssl in ("1", "true", "yes", "on") else "http"
-            consul_addr = f"{scheme}://{consul_addr}"
-
         return Config(
             ssh_host        = os.environ["WIN_SSH_HOST"],
             ssh_user        = os.environ["WIN_SSH_USER"],
             consul_gc_path  = os.environ["CONSUL_GC_PATH"],
-            consul_addr     = consul_addr,
+            consul_addr     = consul_addr_from_env(),
             ssh_port        = int(os.environ.get("WIN_SSH_PORT", "22")),
             ssh_password    = password,
             ssh_key_path    = key,
@@ -144,114 +135,30 @@ class Config:
 # --------------------------------------------------------------------------- #
 # Consul KV state store                                                       #
 # --------------------------------------------------------------------------- #
-class ConsulStateStore:
-    """
-    Stores the provider ownership registry as JSON in Consul KV.
-    Garbage collection uses it to find records removed from desired state.
-    """
+class ConsulStateStore(ProviderStateStore):
+    """Ownership registry and desired records of the Windows DNS provider."""
 
+    zone_backend_field = "win_dns_server"
 
     def __init__(self, cfg: Config) -> None:
-        self.cfg = cfg
-        self.session = requests.Session()
-        if cfg.consul_cacert:
-            self.session.verify = cfg.consul_cacert
-        if cfg.consul_token:
-            self.session.headers["X-Consul-Token"] = cfg.consul_token
+        super().__init__(cfg, log)
 
+    @property
+    def lock_ttl_seconds(self) -> int:
+        # The lock must outlive one SSH command.
+        return max(30, self.cfg.cmd_timeout + 30)
 
-    def provider_lock(self) -> ConsulProviderLock:
-        lock_key = f"{self.cfg.consul_gc_path.rstrip('/')}/locks/{self.cfg.dns_provider_name}"
-        return ConsulProviderLock(
-            self.session, self.cfg.consul_addr, lock_key, self.cfg.dns_provider_name,
-            ttl_seconds=max(30, self.cfg.cmd_timeout + 30),
-            renew_interval_seconds=10,
-            lock_delay_seconds=5,
-        )
-
-    def load_active_records(self) -> Tuple[List[Dict[str, str]], str, bool]:
-        """Read and validate the current minimal ownership registry."""
-        url = f"{self.cfg.consul_addr}/v1/kv/{self.cfg.consul_gc_path}{self.cfg.dns_provider_name}-active-config"
-        try:
-            response = self.session.get(url, timeout=5)
-            if response.status_code == 404:
-                log.info("The ownership registry is empty (first run).")
-                return [], "N/A (cold start)", True
-            response.raise_for_status()
-            raw_value = response.json()[0].get("Value")
-            if not raw_value:
-                return [], "N/A (empty key value)", True
-            payload = json.loads(base64.b64decode(raw_value).decode("utf-8"))
-            records = load_registry_payload(payload, self.cfg.dns_provider_name)
-            updated_at = payload.get("updated_at") or "Date/time not specified"
-            return records, updated_at, True
-        except Exception as error:
-            log.warning(
-                "Failed to read the ownership registry: %s. "
-                "Provider changes and registry writes are disabled.",
-                error,
-            )
-            return [], "N/A (Consul API read error)", False
-
-    def load_desired_records(self) -> Tuple[List[Dict[str, Any]], bool]:
-        url = f"{self.cfg.consul_addr}/v1/kv/{self.cfg.consul_config_path}"
-        try:
-            response = self.session.get(url, timeout=5)
-            if response.status_code == 404:
-                log.error("The desired configuration is missing at %s; GC is disabled", self.cfg.consul_config_path)
-                return [], False
-            response.raise_for_status()
-            encoded = response.json()[0].get("Value")
-            if not encoded:
-                return [], False
-            document = yaml.safe_load(base64.b64decode(encoded).decode("utf-8"))
-            if not isinstance(document, dict) or not isinstance(document.get("zones"), list):
-                raise ValueError("The desired YAML configuration must contain a zones array")
-            records: List[Dict[str, Any]] = []
-            seen = set()
-            for zone_index, zone in enumerate(document["zones"]):
-                if not isinstance(zone, dict) or not isinstance(zone.get("dns_provider"), str):
-                    raise ValueError(f"zones[{zone_index}]: dns_provider is required")
-                if zone["dns_provider"] != self.cfg.dns_provider_name:
-                    continue
-                zone_name = zone.get("zone_name")
-                dns_server = zone.get("win_dns_server")
-                zone_records = zone.get("records")
-                if not zone_name or not dns_server or not isinstance(zone_records, list):
-                    raise ValueError(f"zones[{zone_index}]: zone_name, win_dns_server, and records are required")
-                for record_index, record in enumerate(zone_records):
-                    if not isinstance(record, dict) or record.get("name") is None:
-                        raise ValueError(f"zones[{zone_index}].records[{record_index}]: name is required; use @ for the zone apex")
-                    name = ps_record_name(str(record["name"]))
-                    fqdn = make_fqdn(name, str(zone_name))
-                    duplicate_key = (str(dns_server).casefold(), fqdn, "A")
-                    if duplicate_key in seen:
-                        raise ValueError(f"duplicate desired identity: {duplicate_key}")
-                    seen.add(duplicate_key)
-                    records.append({
-                        "fqdn": fqdn,
-                        "record": name,
-                        "zone": str(zone_name),
-                        "win_dns_server": str(dns_server),
-                        "service_name": None,
-                    })
-            return records, True
-        except (requests.RequestException, ValueError, KeyError, yaml.YAMLError) as error:
-            log.error("Failed to read the desired YAML configuration; GC is disabled: %s", error)
-            return [], False
-
-
-    def save_active_records(self, ownership_records: List[Dict[str, Any]]) -> None:
-        """Save the minimal ownership registry; called only by the lock holder."""
-        url = f"{self.cfg.consul_addr}/v1/kv/{self.cfg.consul_gc_path}{self.cfg.dns_provider_name}-active-config"
-        payload = json.dumps(
-            registry_payload(ownership_records),
-            indent=2,
-            ensure_ascii=False,
-        )
-        response = self.session.put(url, data=payload, timeout=5)
-        response.raise_for_status()
-        log.info("The ownership registry (GC registry) was updated in Consul KV")
+    def desired_record(self, zone_name: str, backend: str,
+                       record_name: str) -> Tuple[Hashable, Dict[str, Any]]:
+        name = ps_record_name(record_name)
+        fqdn = make_fqdn(name, zone_name)
+        return (backend.casefold(), fqdn, "A"), {
+            "fqdn": fqdn,
+            "record": name,
+            "zone": zone_name,
+            "win_dns_server": backend,
+            "service_name": None,
+        }
 
 # --------------------------------------------------------------------------- #
 # SSH and PowerShell client                                                   #
@@ -455,76 +362,8 @@ class WinDNS:
         self._run_ps(script, f"DELETE {name}.{zone}@{dns_server}")
 
 # --------------------------------------------------------------------------- #
-# Decision logic                                                              #
+# Record reconciliation                                                       #
 # --------------------------------------------------------------------------- #
-@dataclass(frozen=True)
-class Decision:
-    action: str
-    ips: List[str]
-    explanation: str
-
-
-def _format_counts(values: Dict[str, Any], ips: List[str], threshold: int) -> str:
-    return ", ".join(
-        f"{ip}={int(values.get(ip, 0))}/{threshold}" for ip in sorted(ips)
-    )
-
-
-def decide(item: Dict[str, Any]) -> Decision:
-    """
-    Return the action, IPs, and a human-readable decision explanation.
-    Votes are counted by unique sites, not by Consul agent count.
-    """
-    quorum = int(item.get("quorum") or 1)
-    minimum_observers = int(item.get("minimum_observers") or quorum)
-    candidates = item.get("candidates") or list((item.get("observations") or {}).keys())
-    observations = item.get("observations") or {}
-    confirms = item.get("confirmations") or {}
-    on_all_fail = (item.get("on_all_fail") or "keep").lower()
-    fallback = (item.get("fallback_ip") or "").strip()
-
-    insufficient = [
-        ip for ip in candidates
-        if int(observations.get(ip, 0)) < minimum_observers
-    ]
-    if insufficient:
-        return Decision(
-            "keep",
-            [],
-            "insufficient observations: "
-            f"{_format_counts(observations, insufficient, minimum_observers)}; "
-            f"minimum_observers={minimum_observers}, quorum={quorum}",
-        )
-
-    ips = sorted(ip for ip in candidates if int(confirms.get(ip, 0)) >= quorum)
-    if ips:
-        return Decision(
-            "set",
-            ips,
-            f"quorum={quorum} reached: {_format_counts(confirms, ips, quorum)}",
-        )
-
-    failed_summary = _format_counts(confirms, candidates, quorum)
-    if on_all_fail == "remove":
-        return Decision(
-            "remove",
-            [],
-            f"no IP reached quorum={quorum}: {failed_summary}; on_all_fail=remove",
-        )
-    if on_all_fail == "fallback" and fallback:
-        return Decision(
-            "set",
-            [fallback],
-            f"no IP reached quorum={quorum}: {failed_summary}; "
-            f"on_all_fail=fallback, fallback_ip={fallback}",
-        )
-    return Decision(
-        "keep",
-        [],
-        f"no IP reached quorum={quorum}: {failed_summary}; on_all_fail=keep",
-    )
-
-
 def ps_record_name(record: str) -> str:
     """Return a WinDNS record name; empty and @ both mean the zone apex."""
     r = (record or "").strip().strip(".")
@@ -547,8 +386,8 @@ def identity_for_item(cfg: Config, item: Dict[str, Any]) -> Dict[str, str]:
     )
 
 
-def reconcile_one(api: WinDNS, item: Dict[str, Any], zone_index: Dict[str, Dict[str, Any]],
-                  allow_delete: bool = True) -> bool:
+def reconcile_one(api: WinDNS, item: Dict[str, Any], decision: Decision,
+                  zone_index: Dict[str, Dict[str, Any]], allow_delete: bool = True) -> bool:
     zone       = item["zone"]
     dns_server = item["win_dns_server"]
     name       = ps_record_name(item.get("record", ""))
@@ -556,7 +395,6 @@ def reconcile_one(api: WinDNS, item: Dict[str, Any], zone_index: Dict[str, Dict[
     svc        = item.get("service_name", f"{name}.{zone}")
     fqdn       = zone if name == "@" else f"{name}.{zone}"
 
-    decision = decide(item)
     action, ips = decision.action, decision.ips
     existing = zone_index.get(name.lower())
 
@@ -641,28 +479,6 @@ def reconcile_one(api: WinDNS, item: Dict[str, Any], zone_index: Dict[str, Dict[
     api.replace_a(dns_server, zone, name, ttl, want)
     return True
 
-# --------------------------------------------------------------------------- #
-# Main                                                                        #
-# --------------------------------------------------------------------------- #
-def load_items(path: str) -> List[Dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, list):
-        raise ValueError("Expected a top-level JSON array")
-    return data
-
-
-def relative_record_name(fqdn: str, zone: str) -> str:
-    fqdn_value = fqdn.rstrip(".")
-    zone_value = zone.rstrip(".")
-    if fqdn_value.casefold() == zone_value.casefold():
-        return "@"
-    suffix = "." + zone_value.casefold()
-    if fqdn_value.casefold().endswith(suffix):
-        return fqdn_value[: -len(suffix)]
-    raise ValueError(f"FQDN {fqdn!r} does not belong to zone {zone!r}")
-
-
 def windns_verified(index: Dict[str, Dict[str, Any]], item: Dict[str, Any],
                    decision: Decision) -> Tuple[bool, bool]:
     name = ps_record_name(str(item.get("record", ""))).casefold()
@@ -680,161 +496,69 @@ def windns_verified(index: Dict[str, Dict[str, Any]], item: Dict[str, Any],
     )
 
 
+# --------------------------------------------------------------------------- #
+# Main                                                                        #
+# --------------------------------------------------------------------------- #
+class WinDNSBackend(ProviderBackend):
+    """Windows DNS side of the shared synchronization flow; records are grouped by (server, zone)."""
+
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.api: Optional[WinDNS] = None
+
+    @property
+    def client(self) -> WinDNS:
+        if self.api is None:
+            raise RuntimeError("the Windows DNS client was used before connect()")
+        return self.api
+
+    def identity_for_item(self, item: Dict[str, Any]) -> Dict[str, str]:
+        return identity_for_item(self.cfg, item)
+
+    def group_key(self, item: Dict[str, Any]) -> Optional[Hashable]:
+        server, zone = item.get("win_dns_server"), item.get("zone")
+        return (str(server), str(zone)) if server and zone else None
+
+    def describe_group(self, group: Any) -> str:
+        server, zone = group
+        return f"{server}/{zone}"
+
+    def orphan_item(self, identity: Dict[str, str]) -> Dict[str, Any]:
+        return {
+            "record": ps_record_name(relative_record_name(identity["fqdn"], identity["zone"])),
+            "zone": identity["zone"],
+            "win_dns_server": identity["backend"],
+            "status": "all_critical",
+            "on_all_fail": "remove",
+            "service_name": f"orphaned-{identity['fqdn']}",
+        }
+
+    def connect(self) -> None:
+        self.api = WinDNS(self.cfg)
+
+    def list_records(self, group: Any) -> Dict[str, Dict[str, Any]]:
+        server, zone = group
+        return self.client.list_a_records(server, zone)
+
+    def reconcile_one(self, item: Dict[str, Any], decision: Decision,
+                      index: Any, allow_delete: bool) -> bool:
+        return reconcile_one(self.client, item, decision, index, allow_delete=allow_delete)
+
+    def verified(self, index: Any, item: Dict[str, Any], decision: Decision) -> Tuple[bool, bool]:
+        return windns_verified(index, item, decision)
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         log.error("Usage: dns-failover-manager-windns.py <state.json>")
         return 2
 
-    src = sys.argv[1]
     try:
         cfg = Config.from_env()
     except (KeyError, RuntimeError) as error:
         log.error("Configuration initialization failed: %s", error)
         return 2
-    state_store = ConsulStateStore(cfg)
-
-    try:
-        with state_store.provider_lock() as provider_lock:
-            provider_lock.assert_held()
-            log.info("Provider lock acquired; reading the current rendered state from %s", src)
-            items = load_items(src)
-
-            previous_records, last_updated_at, previous_known = state_store.load_active_records()
-            current_desired, desired_known = state_store.load_desired_records()
-            log.info("Ownership registry read; previous update time: %s", last_updated_at)
-            if not previous_known or not desired_known:
-                log.error(
-                    "Ownership registry or desired configuration is unavailable: "
-                    "provider synchronization and all DNS changes are disabled"
-                )
-                return 1
-
-            owned = {identity_key(identity): identity for identity in previous_records}
-            desired_by_key: Dict[str, Dict[str, Any]] = {}
-            for record in current_desired:
-                desired_by_key[identity_key(identity_for_item(cfg, record))] = record
-
-            orphan_keys = set(owned) - set(desired_by_key) if previous_known and desired_known else set()
-            by_pair: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
-
-            for item in items:
-                server, zone = item.get("win_dns_server"), item.get("zone")
-                if not server or not zone:
-                    continue
-                identity = identity_for_item(cfg, item)
-                key = identity_key(identity)
-                if not desired_known or key in desired_by_key:
-                    enriched = dict(item)
-                    enriched["_identity"] = identity
-                    by_pair[(str(server), str(zone))].append(enriched)
-
-            for key in orphan_keys:
-                identity = owned[key]
-                record = ps_record_name(relative_record_name(identity["fqdn"], identity["zone"]))
-                by_pair[(identity["backend"], identity["zone"])].append({
-                    "record": record,
-                    "zone": identity["zone"],
-                    "win_dns_server": identity["backend"],
-                    "status": "all_critical",
-                    "on_all_fail": "remove",
-                    "service_name": f"orphaned-{identity['fqdn']}",
-                    "_identity": identity,
-                })
-
-            if not by_pair:
-                log.info("No records to synchronize; saving the known empty ownership registry")
-                provider_lock.assert_held()
-                state_store.save_active_records(list(owned.values()))
-                return 0
-
-            decision_pairs = [(item, decide(item)) for values in by_pair.values() for item in values]
-            if all(decision.action == "keep" for _, decision in decision_pairs):
-                for item, decision in decision_pairs:
-                    fqdn = make_fqdn(str(item.get("record", "")), str(item["zone"]))
-                    log.info(
-                        "[%s] %s A: keeping the current record -- %s",
-                        item.get("service_name", fqdn),
-                        fqdn,
-                        decision.explanation,
-                    )
-                log.info("All decisions are keep; the DNS server will not be queried")
-                return 0
-
-            api = WinDNS(cfg)
-            errors = 0
-            safely_skipped = 0
-            for (server, zone), pair_items in by_pair.items():
-                try:
-                    before = api.list_a_records(server, zone)
-                except Exception as error:
-                    log.error("Failed to read records for %s/%s: %s", server, zone, error)
-                    errors += len(pair_items)
-                    continue
-
-                attempted: List[Tuple[Dict[str, Any], Decision, bool, bool]] = []
-                for item in pair_items:
-                    identity = item["_identity"]
-                    key = identity_key(identity)
-                    decision = decide(item)
-                    allow_delete = key in owned
-                    try:
-                        provider_lock.assert_held()
-                        changed = reconcile_one(api, item, before, allow_delete=allow_delete)
-                        attempted.append((item, decision, allow_delete, changed))
-                    except OwnershipBlocked as reason:
-                        log.warning("[%s] safely skipping record: %s", item.get("service_name"), reason)
-                        safely_skipped += 1
-                    except Exception as error:
-                        log.error("[%s] failed to apply changes: %s", item.get("service_name"), error)
-                        errors += 1
-
-                needs_readback = any(
-                    # item, decision, and allow_delete are not used here
-                    changed for _, _, _, changed in attempted
-                )
-                after = before
-                if needs_readback:
-                    try:
-                        provider_lock.assert_held()
-                        after = api.list_a_records(server, zone)
-                    except Exception as error:
-                        log.error("Failed to verify state for %s/%s: %s", server, zone, error)
-                        errors += len(attempted)
-                        continue
-
-                # changed is not used here
-                for item, decision, allow_delete, _ in attempted:
-                    identity = item["_identity"]
-                    if decision.action == "remove" and not allow_delete:
-                        continue
-                    present, absent = windns_verified(after, item, decision)
-                    _, transition_error = transition_ownership(
-                        owned, identity, decision.action, present, absent
-                    )
-                    if transition_error:
-                        log.error("[%s] record ownership was not confirmed: %s", item.get("service_name"), transition_error)
-                        errors += 1
-
-            if safely_skipped:
-                log.warning(
-                    "Safely skipped unconfirmed records: %d. "
-                    "DNS was not changed; waiting for the next rendered-state update.",
-                    safely_skipped,
-                )
-            if errors:
-                log.error(
-                    "Synchronization completed with errors (%d); "
-                    "only confirmed ownership-registry changes are saved",
-                    errors,
-                )
-            if not previous_known or not desired_known:
-                log.warning("Ownership registry or desired configuration is unavailable; registry not updated")
-            return finish_ownership_sync(
-                state_store, provider_lock, owned, previous_known, desired_known, errors
-            )
-    except (OSError, json.JSONDecodeError, ValueError, requests.RequestException, RuntimeError) as error:
-        log.error("DNS synchronization failed: %s", error)
-        return 1
+    return run_sync(sys.argv[1], ConsulStateStore(cfg), WinDNSBackend(cfg), log)
 
 
 if __name__ == "__main__":

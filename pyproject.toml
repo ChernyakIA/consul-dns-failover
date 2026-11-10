@@ -3,6 +3,6 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 line-length = 120
 exclude = [".git", ".venv"]

@@ -1,5 +1,5 @@
-# Based on the Alpine release used by consul-template 0.42
-FROM hashicorp/consul-template:0.42
+# Based on the Alpine release used by consul-template 0.43
+FROM hashicorp/consul-template:0.43
 USER root
 # Runtime dependencies for provider API and SSH backends
 RUN apk update && apk upgrade && apk add --no-cache python3=~3.12 py3-requests py3-yaml openssh-client=~10.2 sshpass=~1.10

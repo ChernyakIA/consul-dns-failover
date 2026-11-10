@@ -561,7 +561,7 @@ def reconcile_one(api: WinDNS, item: Dict[str, Any], zone_index: Dict[str, Dict[
     existing = zone_index.get(name.lower())
 
     if action == "keep":
-        log.warning(
+        log.info(
             "[%s] %s A: keeping the current record -- %s",
             svc,
             fqdn,
@@ -745,6 +745,19 @@ def main() -> int:
                 log.info("No records to synchronize; saving the known empty ownership registry")
                 provider_lock.assert_held()
                 state_store.save_active_records(list(owned.values()))
+                return 0
+
+            decision_pairs = [(item, decide(item)) for values in by_pair.values() for item in values]
+            if all(decision.action == "keep" for _, decision in decision_pairs):
+                for item, decision in decision_pairs:
+                    fqdn = make_fqdn(str(item.get("record", "")), str(item["zone"]))
+                    log.info(
+                        "[%s] %s A: keeping the current record -- %s",
+                        item.get("service_name", fqdn),
+                        fqdn,
+                        decision.explanation,
+                    )
+                log.info("All decisions are keep; the DNS server will not be queried")
                 return 0
 
             api = WinDNS(cfg)

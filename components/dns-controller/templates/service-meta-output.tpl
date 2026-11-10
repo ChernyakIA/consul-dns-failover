@@ -61,25 +61,25 @@
         {{- if eq (index $meta "dns_provider") $DNS_PROVIDER_NAME -}}
             {{- if not $firstBlock }},{{ end }}
             {
-                "service_name": "{{ $svc }}",
-                "record": "{{ index $meta "record" }}",
-                "zone": "{{ index $meta "zone" }}",
-                "dns_provider": "{{ index $meta "dns_provider" }}",
-                "owner_site": "{{ index $meta "owner_site" }}",
-                "ttl": "{{ index $meta "ttl" }}",
-                "on_all_fail": "{{ or (index $meta "on_all_fail") "keep" }}",
-                "fallback_ip": "{{ index $meta "fallback_ip" }}",
+                "service_name": {{ $svc | toJSON }},
+                "record": {{ index $meta "record" | toJSON }},
+                "zone": {{ index $meta "zone" | toJSON }},
+                "dns_provider": {{ index $meta "dns_provider" | toJSON }},
+                "owner_site": {{ index $meta "owner_site" | toJSON }},
+                "ttl": {{ index $meta "ttl" | toJSON }},
+                "on_all_fail": {{ or (index $meta "on_all_fail") "keep" | toJSON }},
+                "fallback_ip": {{ index $meta "fallback_ip" | toJSON }},
                 "quorum": {{ or (index $meta "quorum") "1" }},
                 "minimum_observers": {{ or (index $meta "minimum_observers") (or (index $meta "quorum") "1") }},
                 {{- range $k, $v := $meta }}
                     {{- if not (in $commonFields $k) }}
-                "{{ $k }}": "{{ $v }}",
+                {{ $k | toJSON }}: {{ $v | toJSON }},
                     {{- end }}
                 {{- end }}
                 "candidates": [
                     {{- $first := true -}}
                     {{- range $ip := scratch.MapValues (printf "candidate|%s" $svc) -}}
-                        {{- if not $first }},{{ end }}"{{ $ip }}"
+                        {{- if not $first }},{{ end }}{{ $ip | toJSON }}
                         {{- $first = false -}}
                     {{- end -}}
                 ],
@@ -89,7 +89,7 @@
                     {{- $first := true -}}
                     {{- range $ip := scratch.MapValues (printf "candidate|%s" $svc) -}}
                         {{- if not $first }},{{ end }}
-                        "{{ $ip }}": {{ len (scratch.MapValues (printf "observed|%s|%s" $svc $ip)) }}
+                        {{ $ip | toJSON }}: {{ len (scratch.MapValues (printf "observed|%s|%s" $svc $ip)) }}
                         {{- $first = false -}}
                     {{- end -}}
                 },
@@ -99,7 +99,7 @@
                     {{- $first := true -}}
                     {{- range $ip := scratch.MapValues (printf "candidate|%s" $svc) -}}
                         {{- if not $first }},{{ end }}
-                        "{{ $ip }}": {{ len (scratch.MapValues (printf "passing|%s|%s" $svc $ip)) }}
+                        {{ $ip | toJSON }}: {{ len (scratch.MapValues (printf "passing|%s|%s" $svc $ip)) }}
                         {{- $first = false -}}
                     {{- end -}}
                 }

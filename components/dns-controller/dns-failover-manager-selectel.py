@@ -274,10 +274,12 @@ def get_iam_token(cfg: Config) -> str:
 
     # Configure retries for DNS errors, timeouts, and 5xx responses
     # https://urllib3.readthedocs.io/en/stable/reference/urllib3.util.html
+    # urllib3 does not retry POST by default; requesting a token is safe to repeat.
     session = requests.Session()
     retries = Retry(
         total=3,
         backoff_factor=1.5,
+        allowed_methods=frozenset({"POST"}),
         status_forcelist=[500, 502, 503, 504],
         raise_on_status=False,
         connect=3,

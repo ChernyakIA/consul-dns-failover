@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Adds the Yandex Cloud DNS container to the dns-manager pod.
+# Requires the dns-manager-yandex-secrets Secret with the service account authorized key.
+patches:
+  - path: dns-manager-yandex-patch.yml
+    target:
+      kind: Deployment
+      name: dns-manager

@@ -23,7 +23,7 @@ jobs:
           cache: pip
           cache-dependency-path: components/monitoring-controller/requirements.txt
       - name: Install test dependencies
-        run: pip install -r components/monitoring-controller/requirements.txt pytest
+        run: pip install -r components/monitoring-controller/requirements.txt pytest 'PyJWT[crypto]'
       - name: Compile Python
         run: python -m compileall -q components
       - name: Run unit tests

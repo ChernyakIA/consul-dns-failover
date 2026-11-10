@@ -2,7 +2,7 @@
 
 ## Kubernetes
 
-The base runs one pod with Selectel and Microsoft DNS containers. `strategy: Recreate` prevents overlapping writers. Each container has separate `/work` and `/tmp` volumes and removes only its stale rendered snapshot before starting `consul-template`.
+The base runs one pod with Selectel and Microsoft DNS containers. The optional `deploy/k8s/components/yandex` Kustomize component adds a Yandex Cloud DNS container and needs the `dns-manager-yandex-secrets` Secret. `strategy: Recreate` prevents overlapping writers. Each container has separate `/work` and `/tmp` volumes and removes only its stale rendered snapshot before starting `consul-template`.
 
 Before applying an overlay: customize the Consul API address, CA and TLS server name; replace the example WinDNS `known_hosts` entry with the real SSH host key; create secrets outside Git; pin a release or digest; ensure only one writer manages a provider/zone set; and render with `kubectl kustomize`. Argo CD does not create credentials.
 

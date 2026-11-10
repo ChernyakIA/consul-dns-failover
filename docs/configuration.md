@@ -5,8 +5,8 @@ The authoritative YAML is stored in Consul KV. `config/monitoring.example.yml` i
 | Key | Meaning |
 | --- | --- |
 | `zone_name` | DNS zone. |
-| `dns_provider` | `selecteldns` or `windns`. |
-| `sel_zone_id` / `win_dns_server` | Provider-specific zone/server identifier. |
+| `dns_provider` | `selecteldns`, `yandexdns`, or `windns`. |
+| `sel_zone_id` / `yc_zone_id` / `win_dns_server` | Provider-specific zone/server identifier. |
 | `record.name` | Relative A-record name. |
 | `ttl` | DNS TTL. |
 | `on_all_fail` | `keep`, `remove`, or `fallback`. |
@@ -43,6 +43,8 @@ Required: `SITE`, `NODE_NAME`, `CONSUL_KV_PATH`.
 Common: `CONSUL_HTTP_ADDR`, `CONSUL_GC_PATH`, `CONSUL_CONFIG_PATH`, `CONSUL_HTTP_TOKEN`, `CONSUL_CACERT`, `CONSUL_HTTP_SSL`, `DNS_PROVIDER_NAME`, `LOG_LEVEL`.
 
 Selectel required: `SEL_ACCOUNT_ID`, `SEL_SERVICE_USER`, `SEL_SERVICE_PASS`, `SEL_PROJECT_NAME`. Optional: `SEL_AUTH_PROJECT_TOKEN_URL`, `SEL_DNS_API_BASE`, `SEL_LIST_RECORDS_LIMIT` (40), `HTTP_CONNECT_TIMEOUT` (5), `HTTP_READ_TIMEOUT` (15), `HTTP_RETRY_TOTAL` (2).
+
+Yandex Cloud DNS required: `YC_SA_KEY_FILE`, the path to a service account authorized key (JSON with `id`, `service_account_id`, `private_key`). The service account needs the `dns.editor` role for the zone or its folder. Optional: `YC_IAM_TOKEN_URL`, `YC_DNS_API_BASE`, `YC_OPERATION_API_BASE`, `YC_LIST_RECORDS_LIMIT` (1000), `YC_OPERATION_TIMEOUT` (60), `HTTP_CONNECT_TIMEOUT` (5), `HTTP_READ_TIMEOUT` (15), `HTTP_RETRY_TOTAL` (2).
 
 Microsoft DNS required: `WIN_SSH_HOST`, `WIN_SSH_USER`, `WIN_SSH_KNOWN_HOSTS`, and one of `WIN_SSH_PASSWORD` or `WIN_SSH_KEY_PATH`. Optional: `WIN_SSH_PORT` (22), `SSH_CONNECT_TIMEOUT` (10), `SSH_TIMEOUT` (60). `WIN_SSH_INSECURE_SKIP_HOST_KEY_CHECK=true` is an explicit migration-only escape hatch and must not be used in production.
 

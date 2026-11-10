@@ -39,6 +39,30 @@ data:
       }
     }
 
+  yandex.hcl: |
+    log_level = "info"
+    consul {
+      address = "consul-server.consul.svc:8501"
+      ssl {
+        enabled     = true
+        verify      = true
+        ca_cert     = "/consul/tls/ca/tls.crt"
+        server_name = "server.dc1.consul"
+      }
+    }
+    template {
+      source      = "/opt/dns-failover/service-meta-output.tpl"
+      destination = "/work/service-state.json"
+      exec {
+        command = ["python3", "/opt/dns-failover/dns-failover-manager-yandex.py", "/work/service-state.json"]
+        timeout = "120s"
+      }
+      wait {
+        min = "5s"
+        max = "10s"
+      }
+    }
+
   windns.hcl: |
     log_level = "info"
     consul {

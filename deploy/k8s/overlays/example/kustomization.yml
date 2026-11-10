@@ -4,6 +4,9 @@ resources:
   - ../../base/dns-manager
   - ../../base/observability
   - windns-known-hosts.example.yml
+# Optional Yandex Cloud DNS container; requires the dns-manager-yandex-secrets Secret.
+# components:
+#   - ../../components/yandex
 images:
   - name: ghcr.io/chernyakia/consul-dns-failover-dns-controller
     newTag: latest

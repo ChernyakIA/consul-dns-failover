@@ -4,7 +4,7 @@ x-restart-policy: &restart-policy unless-stopped
 
 services:
   consul-agent:
-    image: hashicorp/consul:2.0.2
+    image: hashicorp/consul:2.0.4
     restart: *restart-policy
     hostname: ${AGENT_NAME:-consul-monitor-1}
     ports:

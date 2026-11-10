@@ -5,13 +5,9 @@ import pytest
 from conftest import load_module
 
 
-@pytest.fixture(params=[
-    ("selectel", "components/dns-controller/dns-failover-manager-selectel.py"),
-    ("windns", "components/dns-controller/dns-failover-manager-windns.py"),
-])
-def controller(request):
-    name, path = request.param
-    return load_module(f"test_{name}_controller", path)
+@pytest.fixture
+def controller():
+    return load_module("test_dns_controller_common", "components/dns-controller/dns_controller_common.py")
 
 
 def test_unknown_state_keeps_dns_unchanged(controller):

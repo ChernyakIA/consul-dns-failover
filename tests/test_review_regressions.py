@@ -4,6 +4,7 @@ import base64
 from dataclasses import replace
 
 import pytest
+import requests
 
 from conftest import ROOT, load_module
 
@@ -85,8 +86,8 @@ def test_incomplete_desired_state_disables_gc(state_store):
 
 def test_registry_write_failure_is_reported(state_store):
     module, store, _ = state_store
-    store.session = Session(put_error=module.requests.ConnectionError("down"))
-    with pytest.raises(module.requests.ConnectionError, match="down"):
+    store.session = Session(put_error=requests.ConnectionError("down"))
+    with pytest.raises(requests.ConnectionError, match="down"):
         store.save_active_records([])
 
 
@@ -144,3 +145,106 @@ def test_selectel_orphan_record_keeps_zone_text_inside_relative_name():
     ) == "foo.example.com"
     assert module.relative_record_name("example.com", "example.com") == "@"
     assert module.relative_record_name("foo.example.com", "Example.COM") == "foo"
+
+
+def test_selectel_iam_token_request_retries_post_on_server_errors(monkeypatch):
+    from types import SimpleNamespace
+
+    module = load_module(
+        "test_selectel_iam_retry", "components/dns-controller/dns-failover-manager-selectel.py"
+    )
+    mounted = {}
+
+    class TokenResponse:
+        headers = {"X-Subject-Token": "token"}
+
+        def raise_for_status(self):
+            return None
+
+    class RecordingSession:
+        def mount(self, prefix, adapter):
+            mounted[prefix] = adapter
+
+        def post(self, *args, **kwargs):
+            return TokenResponse()
+
+    monkeypatch.setattr(module.requests, "Session", RecordingSession)
+    cfg = SimpleNamespace(
+        service_user="user", account_id="1", service_pass="pass", project_name="project",
+        auth_url="https://auth.invalid/identity/v3/auth/tokens",
+        http_connect_timeout=1, http_read_timeout=1,
+    )
+
+    assert module.get_iam_token(cfg) == "token"
+    retries = mounted["https://"].max_retries
+    assert retries.is_retry("POST", 503)
+    assert not retries.is_retry("POST", 401)
+
+
+def test_windns_skips_ssh_when_every_decision_is_keep(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    module = load_module(
+        "test_windns_all_keep", "components/dns-controller/dns-failover-manager-windns.py"
+    )
+    saved = []
+
+    class Lock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def assert_held(self):
+            return None
+
+    class Store:
+        def __init__(self, cfg):
+            pass
+
+        def provider_lock(self):
+            return Lock()
+
+        def load_active_records(self):
+            return [], "never", True
+
+        def load_desired_records(self):
+            return [{"record": "app", "zone": "example.com", "win_dns_server": "dc1.example.com"}], True
+
+        def save_active_records(self, records):
+            saved.append(records)
+
+    def forbidden(cfg):
+        raise AssertionError("WinDNS must not be contacted when every decision is keep")
+
+    monkeypatch.setattr(module.Config, "from_env", staticmethod(lambda: SimpleNamespace(dns_provider_name="windns")))
+    monkeypatch.setattr(module, "ConsulStateStore", Store)
+    monkeypatch.setattr(module, "WinDNS", forbidden)
+
+    state = tmp_path / "service-state.json"
+    item = {
+        "service_name": "dns-failover-windns-app-example-com",
+        "record": "app",
+        "zone": "example.com",
+        "win_dns_server": "dc1.example.com",
+        "quorum": 2,
+        "minimum_observers": 2,
+        "on_all_fail": "remove",
+        "candidates": ["192.0.2.10"],
+        "observations": {"192.0.2.10": 1},
+        "confirmations": {"192.0.2.10": 1},
+    }
+    state.write_text(json.dumps([item]))
+    monkeypatch.setattr(module.sys, "argv", ["dns-failover-manager-windns.py", str(state)])
+
+    assert module.main() == 0
+    assert saved == []
+
+    # A decision other than keep still reaches the DNS server.
+    item["observations"] = {"192.0.2.10": 2}
+    item["confirmations"] = {"192.0.2.10": 2}
+    state.write_text(json.dumps([item]))
+    with pytest.raises(AssertionError, match="must not be contacted"):
+        module.main()

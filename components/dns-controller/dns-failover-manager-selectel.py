@@ -36,27 +36,23 @@ from __future__ import annotations
 
 import os
 import sys
-import json
 import logging
-import base64
 import requests
-import yaml
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
-from collections import defaultdict
+from typing import Any, Dict, Hashable, List, Optional, Tuple
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
 from dns_controller_common import (
-    ConsulProviderLock,
+    Decision,
     OwnershipBlocked,
+    ProviderBackend,
+    ProviderStateStore,
     build_identity,
-    identity_key,
-    load_registry_payload,
-    registry_payload,
-    transition_ownership,
-    finish_ownership_sync,
+    consul_addr_from_env,
+    relative_record_name,
+    run_sync,
 )
 
 # --------------------------------------------------------------------------- #
@@ -99,18 +95,13 @@ class Config:
             "SEL_SERVICE_USER",
             "SEL_SERVICE_PASS",
             "SEL_PROJECT_NAME",
-            "CONSUL_GC_PATH"
+            "CONSUL_GC_PATH",
+            "CONSUL_HTTP_ADDR",
         ]
         missing_envs = [var for var in required_envs if var not in os.environ]
         if missing_envs:
             log.error("Missing required environment variables: %s", ", ".join(missing_envs))
             sys.exit(1)
-
-        consul_addr = os.environ["CONSUL_HTTP_ADDR"].rstrip("/")
-        if not consul_addr.startswith(("http://", "https://")):
-            consul_http_ssl = os.environ.get("CONSUL_HTTP_SSL", "true").strip().lower()
-            scheme = "https" if consul_http_ssl in ("1", "true", "yes", "on") else "http"
-            consul_addr = f"{scheme}://{consul_addr}"
 
         return Config(
             account_id   = os.environ["SEL_ACCOUNT_ID"],
@@ -129,7 +120,7 @@ class Config:
             http_read_timeout = int(os.environ.get("HTTP_READ_TIMEOUT", os.environ.get("HTTP_TIMEOUT", "15"))),
             http_retry_total = int(os.environ.get("HTTP_RETRY_TOTAL", "2")),
             dns_provider_name = os.environ.get("DNS_PROVIDER_NAME", "selecteldns"),
-            consul_addr  = consul_addr,
+            consul_addr  = consul_addr_from_env(),
             consul_token = os.environ.get("CONSUL_HTTP_TOKEN") or None,
             consul_cacert = os.environ.get("CONSUL_CACERT") or None,
             consul_config_path = os.environ.get(
@@ -140,108 +131,24 @@ class Config:
 # --------------------------------------------------------------------------- #
 # State storage in Consul KV                                                   #
 # --------------------------------------------------------------------------- #
-class ConsulStateStore:
-    """
-    Stores the current list of provider-managed domains as separate JSON in KV.
-    GC uses this file to identify records removed from the previous config version.
-    """
+class ConsulStateStore(ProviderStateStore):
+    """Ownership registry and desired records of the Selectel provider."""
+
+    zone_backend_field = "sel_zone_id"
 
     def __init__(self, cfg: Config) -> None:
-        self.cfg = cfg
-        self.session = requests.Session()
-        if cfg.consul_cacert:
-            self.session.verify = cfg.consul_cacert
-        if cfg.consul_token:
-            self.session.headers["X-Consul-Token"] = cfg.consul_token
+        super().__init__(cfg, log)
 
-    def provider_lock(self) -> ConsulProviderLock:
-        lock_key = f"{self.cfg.consul_gc_path.rstrip('/')}/locks/{self.cfg.dns_provider_name}"
-        return ConsulProviderLock(
-            self.session, self.cfg.consul_addr, lock_key, self.cfg.dns_provider_name,
-            ttl_seconds=30, renew_interval_seconds=10, lock_delay_seconds=5,
-        )
-
-    def load_active_records(self) -> Tuple[List[Dict[str, str]], str, bool]:
-        """Read the current registry."""
-        url = f"{self.cfg.consul_addr}/v1/kv/{self.cfg.consul_gc_path}{self.cfg.dns_provider_name}-active-config"
-        try:
-            response = self.session.get(url, timeout=5)
-            if response.status_code == 404:
-                log.info("The ownership registry is empty (first run).")
-                return [], "N/A (cold start)", True
-            response.raise_for_status()
-            raw_value = response.json()[0].get("Value")
-            if not raw_value:
-                return [], "N/A (empty key value)", True
-            payload = json.loads(base64.b64decode(raw_value).decode("utf-8"))
-            records = load_registry_payload(payload, self.cfg.dns_provider_name)
-            updated_at = payload.get("updated_at") or "Date/time not specified"
-            return records, updated_at, True
-        except Exception as error:
-            log.warning(
-                "Failed to read the registry: %s. "
-                "Provider changes and registry writes are disabled.",
-                error,
-            )
-            return [], "N/A (Consul API read error)", False
-
-    def load_desired_records(self) -> Tuple[List[Dict[str, Any]], bool]:
-        url = f"{self.cfg.consul_addr}/v1/kv/{self.cfg.consul_config_path}"
-        try:
-            response = self.session.get(url, timeout=5)
-            if response.status_code == 404:
-                log.error("The desired YAML configuration is missing from KV at %s; GC is disabled", self.cfg.consul_config_path)
-                return [], False
-            response.raise_for_status()
-            encoded = response.json()[0].get("Value")
-            if not encoded:
-                return [], False
-            document = yaml.safe_load(base64.b64decode(encoded).decode("utf-8"))
-            if not isinstance(document, dict) or not isinstance(document.get("zones"), list):
-                raise ValueError("The desired YAML configuration in KV must contain a zones array")
-            records: List[Dict[str, Any]] = []
-            seen = set()
-            for zone_index, zone in enumerate(document["zones"]):
-                if not isinstance(zone, dict) or not isinstance(zone.get("dns_provider"), str):
-                    raise ValueError(f"zones[{zone_index}]: dns_provider is required")
-                if zone["dns_provider"] != self.cfg.dns_provider_name:
-                    continue
-                zone_name = zone.get("zone_name")
-                zone_id = zone.get("sel_zone_id")
-                zone_records = zone.get("records")
-                if not zone_name or not zone_id or not isinstance(zone_records, list):
-                    raise ValueError(f"zones[{zone_index}]: zone_name, sel_zone_id, and records are required")
-                for record_index, record in enumerate(zone_records):
-                    if not isinstance(record, dict) or record.get("name") is None:
-                        raise ValueError(f"zones[{zone_index}].records[{record_index}]: name is required")
-                    fqdn = make_fqdn(str(record["name"]), str(zone_name)).casefold()
-                    duplicate_key = (str(zone_id), fqdn, "A")
-                    if duplicate_key in seen:
-                        raise ValueError(f"duplicate record in the configuration file: {duplicate_key}")
-                    seen.add(duplicate_key)
-                    records.append({
-                        "fqdn": fqdn,
-                        "record": str(record["name"]),
-                        "zone": str(zone_name),
-                        "sel_zone_id": str(zone_id),
-                        "service_name": None,
-                    })
-            return records, True
-        except (requests.RequestException, ValueError, KeyError, yaml.YAMLError) as error:
-            log.error("Failed to read the desired YAML configuration from KV; GC is disabled: %s", error)
-            return [], False
-
-    def save_active_records(self, ownership_records: List[Dict[str, Any]]) -> None:
-        """Save the minimal ownership registry; called only by the lock holder."""
-        url = f"{self.cfg.consul_addr}/v1/kv/{self.cfg.consul_gc_path}{self.cfg.dns_provider_name}-active-config"
-        payload = json.dumps(
-            registry_payload(ownership_records),
-            indent=2,
-            ensure_ascii=False,
-        )
-        response = self.session.put(url, data=payload, timeout=5)
-        response.raise_for_status()
-        log.info("The ownership registry (GC registry) was updated in Consul KV")
+    def desired_record(self, zone_name: str, backend: str,
+                       record_name: str) -> Tuple[Hashable, Dict[str, Any]]:
+        fqdn = make_fqdn(record_name, zone_name).casefold()
+        return (backend, fqdn, "A"), {
+            "fqdn": fqdn,
+            "record": record_name,
+            "zone": zone_name,
+            "sel_zone_id": backend,
+            "service_name": None,
+        }
 
 # --------------------------------------------------------------------------- #
 # Selectel API                                                                #
@@ -274,10 +181,12 @@ def get_iam_token(cfg: Config) -> str:
 
     # Configure retries for DNS errors, timeouts, and 5xx responses
     # https://urllib3.readthedocs.io/en/stable/reference/urllib3.util.html
+    # urllib3 does not retry POST by default; requesting a token is safe to repeat.
     session = requests.Session()
     retries = Retry(
         total=3,
         backoff_factor=1.5,
+        allowed_methods=frozenset({"POST"}),
         status_forcelist=[500, 502, 503, 504],
         raise_on_status=False,
         connect=3,
@@ -422,7 +331,7 @@ class SelectelDNS:
         self._check(r, f"DELETE rrset={rrset_id}")
 
 # --------------------------------------------------------------------------- #
-# Decision logic                                                              #
+# Record reconciliation                                                       #
 # --------------------------------------------------------------------------- #
 def make_fqdn(record: str, zone: str) -> str:
     record = (record or "").strip(".")
@@ -442,75 +351,9 @@ def identity_for_item(cfg: Config, item: Dict[str, Any]) -> Dict[str, str]:
         str(item.get("fqdn") or make_fqdn(str(item.get("record", "")), str(item["zone"]))),
     )
 
-@dataclass(frozen=True)
-class Decision:
-    action: str
-    ips: List[str]
-    explanation: str
-
-
-def _format_counts(values: Dict[str, Any], ips: List[str], threshold: int) -> str:
-    return ", ".join(
-        f"{ip}={int(values.get(ip, 0))}/{threshold}" for ip in sorted(ips)
-    )
-
-
-def decide(item: Dict[str, Any]) -> Decision:
-    """
-    Return the action, IPs, and a clear explanation of the decision.
-    Count votes by unique sites rather than by the number of Consul agents.
-    """
-    quorum = int(item.get("quorum") or 1)
-    minimum_observers = int(item.get("minimum_observers") or quorum)
-    candidates = item.get("candidates") or list((item.get("observations") or {}).keys())
-    observations = item.get("observations") or {}
-    confirms = item.get("confirmations") or {}
-    on_all_fail = (item.get("on_all_fail") or "keep").lower()
-    fallback = (item.get("fallback_ip") or "").strip()
-
-    insufficient = [
-        ip for ip in candidates
-        if int(observations.get(ip, 0)) < minimum_observers
-    ]
-    if insufficient:
-        return Decision(
-            "keep",
-            [],
-            "insufficient observations: "
-            f"{_format_counts(observations, insufficient, minimum_observers)}; "
-            f"minimum_observers={minimum_observers}, quorum={quorum}",
-        )
-
-    ips = sorted(ip for ip in candidates if int(confirms.get(ip, 0)) >= quorum)
-    if ips:
-        return Decision(
-            "set",
-            ips,
-            f"quorum={quorum} reached: {_format_counts(confirms, ips, quorum)}",
-        )
-
-    failed_summary = _format_counts(confirms, candidates, quorum)
-    if on_all_fail == "remove":
-        return Decision(
-            "remove",
-            [],
-            f"no IP reached quorum={quorum}: {failed_summary}; on_all_fail=remove",
-        )
-    if on_all_fail == "fallback" and fallback:
-        return Decision(
-            "set",
-            [fallback],
-            f"no IP reached quorum={quorum}: {failed_summary}; "
-            f"on_all_fail=fallback, fallback_ip={fallback}",
-        )
-    return Decision(
-        "keep",
-        [],
-        f"no IP reached quorum={quorum}: {failed_summary}; on_all_fail=keep",
-    )
-
 def reconcile_one(api: SelectelDNS,
                   item: Dict[str, Any],
+                  decision: Decision,
                   zone_index: Dict[Tuple[str, str], Dict[str, Any]],
                   allow_delete: bool = True) -> bool:
     fqdn    = make_fqdn(item["record"], item["zone"])
@@ -519,7 +362,6 @@ def reconcile_one(api: SelectelDNS,
     svc     = item.get("service_name", fqdn)
     zone_id = item["sel_zone_id"]
 
-    decision = decide(item)
     action, ips = decision.action, decision.ips
     existing = zone_index.get((fqdn.lower(), rtype))
 
@@ -619,28 +461,6 @@ def reconcile_one(api: SelectelDNS,
     api.patch(zone_id, existing["id"], ttl, ips)
     return True
 
-# --------------------------------------------------------------------------- #
-# Main script                                                                 #
-# --------------------------------------------------------------------------- #
-def load_items(path: str) -> List[Dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, list):
-        raise ValueError("Expected a top-level JSON array, but received an object")
-    return data
-
-
-def relative_record_name(fqdn: str, zone: str) -> str:
-    fqdn_value = fqdn.rstrip(".")
-    zone_value = zone.rstrip(".")
-    if fqdn_value.casefold() == zone_value.casefold():
-        return "@"
-    suffix = "." + zone_value.casefold()
-    if fqdn_value.casefold().endswith(suffix):
-        return fqdn_value[: -len(suffix)]
-    raise ValueError(f"FQDN {fqdn!r} does not belong to zone {zone!r}")
-
-
 def selectel_verified(index: Dict[Tuple[str, str], Dict[str, Any]],
                       item: Dict[str, Any], decision: Decision) -> Tuple[bool, bool]:
     fqdn = make_fqdn(str(item.get("record", "")), str(item["zone"])).rstrip(".").casefold()
@@ -660,150 +480,64 @@ def selectel_verified(index: Dict[Tuple[str, str], Dict[str, Any]],
     return current_ips == expected_ips and current_ttl == expected_ttl, False
 
 
+# --------------------------------------------------------------------------- #
+# Main script                                                                 #
+# --------------------------------------------------------------------------- #
+class SelectelBackend(ProviderBackend):
+    """Selectel side of the shared synchronization flow; records are grouped by zone ID."""
+
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.api: Optional[SelectelDNS] = None
+
+    @property
+    def client(self) -> SelectelDNS:
+        if self.api is None:
+            raise RuntimeError("the Selectel client was used before connect()")
+        return self.api
+
+    def identity_for_item(self, item: Dict[str, Any]) -> Dict[str, str]:
+        return identity_for_item(self.cfg, item)
+
+    def group_key(self, item: Dict[str, Any]) -> Optional[Hashable]:
+        zone_id = item.get("sel_zone_id")
+        return str(zone_id) if zone_id else None
+
+    def describe_group(self, group: Any) -> str:
+        return f"zone {group}"
+
+    def orphan_item(self, identity: Dict[str, str]) -> Dict[str, Any]:
+        return {
+            "record": relative_record_name(identity["fqdn"], identity["zone"]),
+            "zone": identity["zone"],
+            "sel_zone_id": identity["zone_id"],
+            "status": "all_critical",
+            "on_all_fail": "remove",
+            "service_name": f"orphaned-{identity['fqdn']}",
+        }
+
+    def connect(self) -> None:
+        # The IAM token is requested only when a provider change may be required.
+        self.api = SelectelDNS(self.cfg, get_iam_token(self.cfg))
+
+    def list_records(self, group: Any) -> Dict[Tuple[str, str], Dict[str, Any]]:
+        return self.client.list_rrsets(str(group))
+
+    def reconcile_one(self, item: Dict[str, Any], decision: Decision,
+                      index: Any, allow_delete: bool) -> bool:
+        return reconcile_one(self.client, item, decision, index, allow_delete=allow_delete)
+
+    def verified(self, index: Any, item: Dict[str, Any], decision: Decision) -> Tuple[bool, bool]:
+        return selectel_verified(index, item, decision)
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         log.error("Usage: dns-failover-manager-selectel.py <state.json>")
         return 2
 
-    src = sys.argv[1]
     cfg = Config.from_env()
-    state_store = ConsulStateStore(cfg)
-
-    try:
-        with state_store.provider_lock() as provider_lock:
-            provider_lock.assert_held()
-            log.info("After acquiring the provider lock, reading the current final state from %s", src)
-            items = load_items(src)
-
-            previous_records, last_updated_at, previous_known = state_store.load_active_records()
-            current_desired, desired_known = state_store.load_desired_records()
-            log.info("Ownership registry read; previous update time: %s", last_updated_at)
-            if not previous_known or not desired_known:
-                log.error(
-                    "The ownership registry or desired configuration is unavailable: "
-                    "provider synchronization and all DNS changes are disabled"
-                )
-                return 1
-
-            owned = {identity_key(identity): identity for identity in previous_records}
-            desired_by_key: Dict[str, Dict[str, Any]] = {}
-            for record in current_desired:
-                desired_by_key[identity_key(identity_for_item(cfg, record))] = record
-
-            orphan_keys = set(owned) - set(desired_by_key) if previous_known and desired_known else set()
-            by_zone: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-
-            for item in items:
-                zone_id = item.get("sel_zone_id")
-                if not zone_id:
-                    continue
-                identity = identity_for_item(cfg, item)
-                key = identity_key(identity)
-                if not desired_known or key in desired_by_key:
-                    enriched = dict(item)
-                    enriched["_identity"] = identity
-                    by_zone[str(zone_id)].append(enriched)
-
-            for key in orphan_keys:
-                identity = owned[key]
-                by_zone[str(identity["zone_id"])].append({
-                    "record": relative_record_name(identity["fqdn"], identity["zone"]),
-                    "zone": identity["zone"],
-                    "sel_zone_id": identity["zone_id"],
-                    "status": "all_critical",
-                    "on_all_fail": "remove",
-                    "service_name": f"orphaned-{identity['fqdn']}",
-                    "_identity": identity,
-                })
-
-            if not by_zone:
-                log.info("No records to synchronize; saving the known empty ownership registry")
-                provider_lock.assert_held()
-                state_store.save_active_records(list(owned.values()))
-                return 0
-
-            decision_pairs = [(item, decide(item)) for values in by_zone.values() for item in values]
-            if all(decision.action == "keep" for _, decision in decision_pairs):
-                log.info("All decisions are keep; the DNS provider will not be queried")
-                return 0
-
-            provider_lock.assert_held()
-            api = SelectelDNS(cfg, get_iam_token(cfg))
-            errors = 0
-            safely_skipped = 0
-
-            for zone_id, zone_items in by_zone.items():
-                try:
-                    before = api.list_rrsets(zone_id)
-                except Exception as error:
-                    log.error("Failed to read RRsets for zone %s: %s", zone_id, error)
-                    errors += len(zone_items)
-                    continue
-
-                attempted: List[Tuple[Dict[str, Any], Decision, bool, bool]] = []
-                for item in zone_items:
-                    identity = item["_identity"]
-                    key = identity_key(identity)
-                    decision = decide(item)
-                    allow_delete = key in owned
-                    try:
-                        provider_lock.assert_held()
-                        changed = reconcile_one(api, item, before, allow_delete=allow_delete)
-                        attempted.append((item, decision, allow_delete, changed))
-                    except OwnershipBlocked as reason:
-                        log.warning("[%s] safely skipping record: %s", item.get("service_name"), reason)
-                        safely_skipped += 1
-                    except Exception as error:
-                        log.error("[%s] failed to apply changes: %s", item.get("service_name"), error)
-                        errors += 1
-
-                needs_readback = any(
-                    # item, decision, and allow_delete are unused
-                    changed for _, _, _, changed in attempted
-                )
-                after = before
-                if needs_readback:
-                    try:
-                        provider_lock.assert_held()
-                        after = api.list_rrsets(zone_id)
-                    except Exception as error:
-                        log.error("Failed to reread the state of zone %s: %s", zone_id, error)
-                        errors += len(attempted)
-                        continue
-
-                # changed is unused
-                for item, decision, allow_delete, _ in attempted:
-                    identity = item["_identity"]
-                    if decision.action == "remove" and not allow_delete:
-                        continue
-                    present, absent = selectel_verified(after, item, decision)
-                    _, transition_error = transition_ownership(
-                        owned, identity, decision.action, present, absent
-                    )
-                    if transition_error:
-                        log.error("[%s] record ownership was not confirmed: %s", item.get("service_name"), transition_error)
-                        errors += 1
-
-            if safely_skipped:
-                log.warning(
-                    "Safely skipped unconfirmed records: %d. "
-                    "DNS was not changed; waiting for the next final-state update.",
-                    safely_skipped,
-                )
-            if errors:
-                log.error(
-                    "Synchronization completed with errors (%d); "
-                    "only confirmed ownership-registry changes are saved",
-                    errors,
-                )
-            if not previous_known or not desired_known:
-                log.warning("The ownership registry or desired configuration is unavailable: the registry will not be updated")
-            return finish_ownership_sync(
-                state_store, provider_lock, owned, previous_known, desired_known, errors
-            )
-    except (OSError, json.JSONDecodeError, ValueError, requests.RequestException, RuntimeError) as error:
-        log.error("DNS synchronization failed: %s", error)
-        return 1
+    return run_sync(sys.argv[1], ConsulStateStore(cfg), SelectelBackend(cfg), log)
 
 
 if __name__ == "__main__":

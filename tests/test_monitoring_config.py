@@ -151,3 +151,39 @@ def test_active_checks_restart_only_changed_workers(manager, monkeypatch):
     finally:
         checks.stop()
     assert checks.workers == {}
+
+
+def test_icmp_pass_output_does_not_depend_on_round_trip_time(manager, monkeypatch):
+    from types import SimpleNamespace
+
+    text = """
+defaults:
+  check: {interval: 15s, timeout: 5s}
+  quorum: 1
+zones:
+  - zone_name: example.com
+    dns_provider: selecteldns
+    records:
+      - name: app
+        endpoints:
+          - ip: 192.0.2.10
+            uplink_provider: provider-a
+            owner_site: site-b
+            sites: [site-a]
+            check: {kind: icmp}
+"""
+    (service,) = manager.parse_desired_state(text, config(manager)).values()
+    replies = iter([
+        SimpleNamespace(returncode=0, stdout="rtt min/avg/max/mdev = 0.045/0.045/0.045/0.000 ms\n", stderr=""),
+        SimpleNamespace(returncode=0, stdout="rtt min/avg/max/mdev = 1.310/1.310/1.310/0.000 ms\n", stderr=""),
+        SimpleNamespace(returncode=1, stdout="1 packets transmitted, 0 received, 100% packet loss, time 0ms\n", stderr=""),
+    ])
+    monkeypatch.setattr(manager.subprocess, "run", lambda *args, **kwargs: next(replies))
+
+    first = manager._execute_check(service)
+    second = manager._execute_check(service)
+    failed = manager._execute_check(service)
+
+    assert first == second == (manager.CheckResult.PASS, "ICMP 192.0.2.10 reachable")
+    assert failed[0] is manager.CheckResult.FAIL
+    assert "100% packet loss" in failed[1]

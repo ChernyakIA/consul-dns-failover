@@ -631,7 +631,9 @@ def _execute_check(desired: DesiredService) -> Tuple[CheckResult, str]:
             )
             output = (completed.stdout or completed.stderr or "ping failed").strip().splitlines()[-1]
             if completed.returncode == 0:
-                return CheckResult.PASS, output
+                # The ping summary carries a varying rtt. A changing note makes the agent
+                # resync the check to the catalog although its status is unchanged.
+                return CheckResult.PASS, f"ICMP {target} reachable"
             if completed.returncode == 1:
                 return CheckResult.FAIL, output
             return CheckResult.ERROR, (

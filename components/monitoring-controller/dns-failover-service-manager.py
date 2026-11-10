@@ -677,6 +677,7 @@ class ActiveCheckWorker:
         # Do not share requests.Session between the blocking KV watch and worker threads.
         self.consul = ConsulClient(consul.cfg)
         self.desired = desired
+        self.config_hash = desired.config_hash()
         self.stop_event = threading.Event()
         self.thread = threading.Thread(
             target=self._run,
@@ -770,14 +771,35 @@ class ActiveCheckSet:
         self.workers: Dict[str, ActiveCheckWorker] = {}
 
     def replace(self, desired: Dict[str, DesiredService]) -> None:
-        for worker in self.workers.values():
+        """
+        Bring the running workers in line with the desired state.
+        A worker whose config_hash is unchanged keeps running, so its streak counters
+        and last published status survive unrelated KV changes.
+        """
+        kept: Dict[str, ActiveCheckWorker] = {}
+        stale = []
+        for sid, worker in self.workers.items():
+            item = desired.get(sid)
+            if item is not None and worker.thread.is_alive() and worker.config_hash == item.config_hash():
+                kept[sid] = worker
+            else:
+                stale.append(worker)
+
+        for worker in stale:
             worker.stop()
-        for worker in self.workers.values():
+        for worker in stale:
             worker.join()
-        self.workers = {sid: ActiveCheckWorker(self.consul, item) for sid, item in desired.items()}
-        for worker in self.workers.values():
+
+        started = {
+            sid: ActiveCheckWorker(self.consul, item)
+            for sid, item in desired.items()
+            if sid not in kept
+        }
+        for worker in started.values():
             worker.start()
-        log.info("Started active checks: %d", len(self.workers))
+        self.workers = {**kept, **started}
+        log.info("Active checks: running=%d (started=%d, stopped=%d, unchanged=%d)",
+                 len(self.workers), len(started), len(stale), len(kept))
 
     def stop(self) -> None:
         self.replace({})

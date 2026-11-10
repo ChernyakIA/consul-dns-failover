@@ -91,3 +91,63 @@ zones:
 """
     with pytest.raises(manager.InvalidDesiredState, match="check.port"):
         manager.parse_desired_state(text, config(manager))
+
+
+TWO_ENDPOINTS = """
+defaults:
+  check: {{interval: {interval}, timeout: 5s}}
+  quorum: 1
+zones:
+  - zone_name: example.com
+    dns_provider: selecteldns
+    records:
+      - name: app
+        endpoints:
+          - ip: 192.0.2.10
+            uplink_provider: provider-a
+            owner_site: site-b
+            sites: [site-a]
+            check: {{kind: tcp, port: 443}}
+          - ip: 192.0.2.20
+            uplink_provider: provider-b
+            owner_site: site-b
+            sites: [site-a]
+            check: {{kind: tcp, port: 443, interval: 30s}}
+"""
+
+
+def test_active_checks_restart_only_changed_workers(manager, monkeypatch):
+    def idle(self):
+        self.stop_event.wait()
+
+    monkeypatch.setattr(manager.ActiveCheckWorker, "_run", idle)
+    cfg = config(manager)
+    checks = manager.ActiveCheckSet(manager.ConsulClient(cfg))
+
+    def by_address(desired):
+        return {item.address: sid for sid, item in desired.items()}
+
+    try:
+        first = manager.parse_desired_state(TWO_ENDPOINTS.format(interval="15s"), cfg)
+        checks.replace(first)
+        ids = by_address(first)
+        changed_before = checks.workers[ids["192.0.2.10"]]
+        unchanged_before = checks.workers[ids["192.0.2.20"]]
+
+        # Only the first endpoint inherits defaults.check.interval.
+        second = manager.parse_desired_state(TWO_ENDPOINTS.format(interval="20s"), cfg)
+        checks.replace(second)
+
+        assert checks.workers[ids["192.0.2.20"]] is unchanged_before
+        assert unchanged_before.thread.is_alive()
+        assert checks.workers[ids["192.0.2.10"]] is not changed_before
+        assert not changed_before.thread.is_alive()
+        assert checks.workers[ids["192.0.2.10"]].desired.interval_seconds == 20.0
+
+        del second[ids["192.0.2.20"]]
+        checks.replace(second)
+        assert set(checks.workers) == {ids["192.0.2.10"]}
+        assert not unchanged_before.thread.is_alive()
+    finally:
+        checks.stop()
+    assert checks.workers == {}

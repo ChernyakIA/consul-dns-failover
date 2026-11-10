@@ -33,7 +33,6 @@ spec:
       containers:
         - name: selectel
           image: ghcr.io/chernyakia/consul-dns-failover-dns-controller:0.3.1
-          imagePullPolicy: Always
           # emptyDir переживает restart отдельного container.
           # Если предыдущая exec-команда завершилась с ошибкой, старый destination останется
           # неизменным и consul-template не вызывает после рестарта до изменения состояния catalog.
@@ -102,7 +101,6 @@ spec:
 
         - name: windns
           image: ghcr.io/chernyakia/consul-dns-failover-dns-controller:0.3.1
-          imagePullPolicy: Always
           command: ["/bin/sh", "-ec"]
           args:
             - |

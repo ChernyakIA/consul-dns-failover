@@ -10,7 +10,7 @@ Checks are executed by Python workers; Consul receives TTL checks. This permits 
 
 `consul-template` watches Catalog, ignores observations from agents whose `serfHealth` is not passing, deduplicates votes by site, and writes a JSON snapshot. Provider reconcilers run when the rendered result changes.
 
-The Selectel backend uses DNS API v2. Safe GET requests may be retried; mutating requests are not automatically retried. The Microsoft DNS backend runs encoded PowerShell over SSH. Reconciliation is idempotent: existing records are read before mutation and already-correct records are skipped.
+The Selectel backend uses DNS API v2. Safe GET requests may be retried; mutating requests are not automatically retried. The Yandex Cloud DNS backend exchanges a JWT signed with the service account authorized key for an IAM token; it creates and deletes record sets with the strict `updateRecordSets` call, replaces them with `upsertRecordSets`, and waits for each asynchronous operation to finish. The Microsoft DNS backend runs encoded PowerShell over SSH. Reconciliation is idempotent: existing records are read before mutation and already-correct records are skipped.
 
 ## Site, owner site and node
 
@@ -35,6 +35,7 @@ Managed-record registries use:
 
 ```text
 dns-failover/gc/selecteldns-active-config
+dns-failover/gc/yandexdns-active-config
 dns-failover/gc/windns-active-config
 ```
 

@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dns-manager
+  namespace: consul
+spec:
+  template:
+    spec:
+      containers:
+        - name: yandex
+          image: ghcr.io/chernyakia/consul-dns-failover-dns-controller:0.3.1
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              if [ -f /work/service-state.json ]; then
+                echo "Удаляю оставшийся после предыдущего запуска файл /work/service-state.json перед запуском Yandex Cloud DNS-manager"
+                rm -f /work/service-state.json
+              fi
+              exec consul-template -config=/etc/consul-template/yandex.hcl
+          env:
+            - name: CONSUL_HTTP_ADDR
+              valueFrom:
+                configMapKeyRef: {name: dns-manager-config, key: CONSUL_HTTP_ADDR}
+            - name: DNS_PROVIDER_NAME
+              value: yandexdns
+            - name: CONSUL_CACERT
+              value: /consul/tls/ca/tls.crt
+            - name: CONSUL_HTTP_TOKEN
+              valueFrom:
+                secretKeyRef: {name: consul-dns-manager-token, key: token}
+            - name: CONSUL_CONFIG_PATH
+              valueFrom:
+                configMapKeyRef: {name: dns-manager-config, key: CONSUL_CONFIG_PATH}
+            - name: CONSUL_GC_PATH
+              valueFrom:
+                configMapKeyRef: {name: dns-manager-config, key: CONSUL_GC_PATH}
+            - name: SERVICE_NAME_REGEX
+              valueFrom:
+                configMapKeyRef: {name: dns-manager-config, key: SERVICE_NAME_REGEX}
+            - name: HTTP_CONNECT_TIMEOUT
+              valueFrom:
+                configMapKeyRef: {name: dns-manager-config, key: HTTP_CONNECT_TIMEOUT}
+            - name: HTTP_READ_TIMEOUT
+              valueFrom:
+                configMapKeyRef: {name: dns-manager-config, key: HTTP_READ_TIMEOUT}
+            - name: HTTP_RETRY_TOTAL
+              valueFrom:
+                configMapKeyRef: {name: dns-manager-config, key: HTTP_RETRY_TOTAL}
+            - name: YC_SA_KEY_FILE
+              value: /etc/yandex/authorized_key.json
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 300m, memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - {name: config, mountPath: /etc/consul-template/yandex.hcl, subPath: yandex.hcl, readOnly: true}
+            - {name: consul-ca, mountPath: /consul/tls/ca, readOnly: true}
+            - {name: yandex-key, mountPath: /etc/yandex, readOnly: true}
+            - {name: work-yandex, mountPath: /work}
+            - {name: tmp-yandex, mountPath: /tmp}
+      volumes:
+        - name: yandex-key
+          secret:
+            secretName: dns-manager-yandex-secrets
+            items:
+              - {key: authorized_key.json, path: authorized_key.json}
+        - {name: work-yandex, emptyDir: {}}
+        - {name: tmp-yandex, emptyDir: {}}

@@ -66,7 +66,7 @@ data:
               sum by (cluster, pod, namespace, container) (
                 count_over_time(
                   {namespace="consul", pod=~"dns-manager-.*"}
-                  |~ "(?i)(Selectel DNS API:|Selectel authentication failed|SSH timeout|refused|Connection refused)"
+                  |~ "(?i)(Selectel DNS API:|Selectel authentication failed|Yandex Cloud DNS API:|Yandex Cloud authentication failed|SSH timeout|refused|Connection refused)"
                   [1m]
                 )
               ) > 0

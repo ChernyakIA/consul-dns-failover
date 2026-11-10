@@ -39,6 +39,22 @@ zones:
               path: "/healthz"
               method: "GET"
 
+  - zone_name: "example.org"
+    dns_provider: "yandexdns"
+    yc_zone_id: "dns00000000000000000"
+    records:
+      - name: "www"
+        on_all_fail: "keep"
+        endpoints:
+          - ip: "203.0.113.10"
+            uplink_provider: "provider-a"
+            owner_site: "site-a"
+            sites: ["site-b", "site-c"]
+            check:
+              kind: "tcp"
+              target: "203.0.113.10"
+              port: 443
+
   - zone_name: "internal.example.com"
     dns_provider: "windns"
     win_dns_server: "dns01.internal.example.com"

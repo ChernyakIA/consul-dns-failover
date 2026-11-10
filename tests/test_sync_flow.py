@@ -23,6 +23,12 @@ PROVIDERS = {
         "zone_field": "win_dns_server",
         "zone_value": "dc1.example.com",
     },
+    "yandex": {
+        "path": "components/dns-controller/dns-failover-manager-yandex.py",
+        "provider": "yandexdns",
+        "zone_field": "yc_zone_id",
+        "zone_value": "dns-zone-1",
+    },
 }
 
 
@@ -57,6 +63,26 @@ class FakeDns:
     def delete(self, zone_id, rrset_id):
         self.calls.append("delete")
         del self.records[rrset_id]
+
+    # Yandex Cloud client
+    def list_record_sets(self, zone_id):
+        self._list()
+        return {
+            (f"{name}.{ZONE}", "A"): {"name": f"{name}.{ZONE}.", "type": "A", "ttl": str(ttl), "data": list(ips)}
+            for name, (ttl, ips) in self.records.items()
+        }
+
+    def add_record_set(self, zone_id, fqdn, ttl, ips):
+        self.calls.append("create")
+        self.records[fqdn.split(".")[0]] = (ttl, list(ips))
+
+    def replace_record_set(self, zone_id, fqdn, ttl, ips):
+        self.calls.append("update")
+        self.records[fqdn.split(".")[0]] = (ttl, list(ips))
+
+    def delete_record_set(self, zone_id, record_set):
+        self.calls.append("delete")
+        del self.records[record_set["name"].split(".")[0]]
 
     # WinDNS client
     def list_a_records(self, dns_server, zone):
@@ -137,6 +163,9 @@ def sync(request, monkeypatch, tmp_path):
         monkeypatch.setattr(module, "ConsulStateStore", lambda cfg: store)
         if request.param == "selectel":
             monkeypatch.setattr(module, "SelectelDNS", lambda cfg, token: dns)
+            monkeypatch.setattr(module, "get_iam_token", lambda cfg: "token")
+        elif request.param == "yandex":
+            monkeypatch.setattr(module, "YandexDNS", lambda cfg, token: dns)
             monkeypatch.setattr(module, "get_iam_token", lambda cfg: "token")
         else:
             monkeypatch.setattr(module, "WinDNS", lambda cfg: dns)

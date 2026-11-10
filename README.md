@@ -7,7 +7,7 @@
 
 Distributed health checking and automated DNS A-record reconciliation built on HashiCorp Consul.
 
-The system observes each endpoint from multiple independent sites, distinguishes a confirmed outage from missing monitoring data, and changes DNS only after the configured quorum has been reached. Currently it supports Selectel DNS and Microsoft DNS over SSH/PowerShell.
+The system observes each endpoint from multiple independent sites, distinguishes a confirmed outage from missing monitoring data, and changes DNS only after the configured quorum has been reached. Currently it supports Selectel DNS, Yandex Cloud DNS, and Microsoft DNS over SSH/PowerShell.
 
 > [!WARNING]
 > This software can create, replace, and delete DNS records. Test with delegated zones, keep `on_all_fail: keep` during rollout, and use least-privilege credentials. Multiple replicas of the same DNS controller configuration are supported only when they share the same Consul cluster, provider lock, ownership registry, and desired state. Never mix lock-aware controllers with older versions or run conflicting configurations for the same provider and zone set.
@@ -28,13 +28,14 @@ Consul Catalog + TTL checks + site metadata
 consul-template -> aggregated JSON snapshot
         |
         +--> Selectel DNS reconciler
+        +--> Yandex Cloud DNS reconciler
         `--> Microsoft DNS reconciler over SSH
 ```
 
 | Image | Purpose |
 | --- | --- |
 | `ghcr.io/chernyakia/consul-dns-failover-monitoring-controller` | Reads desired state from Consul KV, runs active checks and publishes TTL state to the local Consul agent. |
-| `ghcr.io/chernyakia/consul-dns-failover-dns-controller` | Renders Catalog state and reconciles Selectel or Microsoft DNS. |
+| `ghcr.io/chernyakia/consul-dns-failover-dns-controller` | Renders Catalog state and reconciles Selectel, Yandex Cloud, or Microsoft DNS. |
 
 ## Safety model
 
@@ -96,7 +97,7 @@ Real secrets, CA files, live desired state, internal hostnames, and environment-
 ## Local checks
 
 ```sh
-python -m pip install -r components/monitoring-controller/requirements.txt pytest
+python -m pip install -r components/monitoring-controller/requirements.txt pytest 'PyJWT[crypto]'
 python -m compileall -q components
 pytest
 docker build components/monitoring-controller
